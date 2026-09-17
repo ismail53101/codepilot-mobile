@@ -9,6 +9,8 @@ import 'models.dart';
 import 'project_service.dart';
 import 'stores.dart';
 
+const githubOAuthClientId = 'Ov23liNr0y5Ux3jdEoYq';
+
 class GitHubException implements Exception {
   final String message;
   const GitHubException(this.message);
@@ -42,6 +44,47 @@ class GitHubService {
   Future<String?> readToken() => store.readGitHubToken();
   Future<void> saveToken(String token) => store.writeGitHubToken(token);
   Future<void> deleteToken() => store.deleteGitHubToken();
+
+  /// Starts GitHub's OAuth device flow. The caller displays the user_code and
+  /// opens verification_uri in a browser; this method polls until authorized.
+  Future<({String userCode, String verificationUri, String deviceCode})> startDeviceFlow() async {
+    final response = await http.post(
+      Uri.parse('https://github.com/login/device/code'),
+      headers: {'Accept': 'application/json'},
+      body: {'client_id': githubOAuthClientId, 'scope': 'repo read:user'},
+    );
+    if (response.statusCode != 200) throw GitHubException(_error(response));
+    final data = jsonDecode(response.body) as Map<String, dynamic>;
+    return (
+      userCode: data['user_code'] as String,
+      verificationUri: data['verification_uri'] as String,
+      deviceCode: data['device_code'] as String,
+    );
+  }
+
+  Future<void> completeDeviceFlow(String deviceCode) async {
+    for (var attempt = 0; attempt < 60; attempt++) {
+      await Future.delayed(const Duration(seconds: 5));
+      final response = await http.post(
+        Uri.parse('https://github.com/login/oauth/access_token'),
+        headers: {'Accept': 'application/json'},
+        body: {'client_id': githubOAuthClientId, 'device_code': deviceCode, 'grant_type': 'urn:ietf:params:oauth:grant-type:device_code'},
+      );
+      final data = jsonDecode(response.body) as Map<String, dynamic>;
+      final token = data['access_token'] as String?;
+      if (token != null && token.isNotEmpty) {
+        await saveToken(token);
+        return;
+      }
+      final error = data['error'] as String?;
+      if (error == 'access_denied' || error == 'expired_token') {
+        throw GitHubException('GitHub authorization was $error. Please try again.');
+      }
+      // authorization_pending and slow_down are expected while the user acts.
+      if (error == 'slow_down') await Future.delayed(const Duration(seconds: 5));
+    }
+    throw const GitHubException('GitHub authorization timed out. Please try again.');
+  }
 
   Future<Map<String, String>> _auth() async {
     final token = await readToken();

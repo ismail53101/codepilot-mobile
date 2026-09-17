@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../github_service.dart';
 import '../main.dart';
@@ -50,6 +51,24 @@ class _GitHubScreenState extends State<GitHubScreen> {
     }
   }
 
+  Future<void> _connectWithGitHub() async {
+    setState(() { _busy = true; _message = 'Preparing GitHub sign-in…'; });
+    try {
+      final flow = await githubService.startDeviceFlow();
+      final opened = await launchUrl(Uri.parse(flow.verificationUri), mode: LaunchMode.externalApplication);
+      if (!opened) throw GitHubException('Could not open GitHub. Visit ${flow.verificationUri} manually.');
+      if (!mounted) return;
+      setState(() => _message = 'Enter code ${flow.userCode} on GitHub. Waiting for authorization…');
+      await githubService.completeDeviceFlow(flow.deviceCode);
+      final repos = await githubService.listRepos();
+      if (mounted) setState(() { _repos = repos; _message = 'GitHub connected. Select a repository.'; });
+    } on GitHubException catch (e) {
+      if (mounted) setState(() => _message = e.message);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
   Future<void> _refresh() async {
     setState(() { _busy = true; _message = null; });
     try {
@@ -93,8 +112,12 @@ class _GitHubScreenState extends State<GitHubScreen> {
           Card(child: Padding(padding: const EdgeInsets.all(16), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             const Text('Connect GitHub', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 18)),
             const SizedBox(height: 8),
-            Text('Use a GitHub token with repository Contents read/write access. It is stored only in Android secure storage.', style: TextStyle(color: AppTheme.muted, fontSize: 13)),
+            Text('Sign in securely with GitHub. Your authorization token is stored only in Android secure storage.', style: TextStyle(color: AppTheme.muted, fontSize: 13)),
             const SizedBox(height: 12),
+            FilledButton.icon(onPressed: _busy ? null : _connectWithGitHub, icon: const Icon(Icons.login), label: Text(_busy ? 'Waiting for GitHub…' : 'Sign in with GitHub')),
+            const SizedBox(height: 12),
+            const Center(child: Text('or connect with a token', style: TextStyle(fontSize: 12))),
+            const SizedBox(height: 8),
             TextField(controller: _token, obscureText: _hidden, decoration: InputDecoration(labelText: 'Personal access token', hintText: 'github_pat_…', suffixIcon: IconButton(icon: Icon(_hidden ? Icons.visibility : Icons.visibility_off), onPressed: () => setState(() => _hidden = !_hidden)))),
             const SizedBox(height: 12),
             FilledButton.icon(onPressed: _busy ? null : _connect, icon: const Icon(Icons.login), label: Text(_busy ? 'Working…' : 'Connect and load repositories')),

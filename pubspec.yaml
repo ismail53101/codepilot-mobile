@@ -18,6 +18,7 @@ dependencies:
   share_plus: ^9.0.0        # share exported ZIP
   cross_file: ^0.3.4+2       # shared file type for share_plus
   path: ^1.9.0
+  url_launcher: ^6.3.0     # GitHub OAuth device verification page
 
 dev_dependencies:
   flutter_test:
