@@ -12,6 +12,12 @@ jobs:
           flutter-version: "3.24.0"
           channel: stable
       - run: flutter create . --org com.codepilot --project-name codepilot_mobile
+      - name: Configure Android build compatibility
+        run: |
+          # Current Flutter plugins require Android SDK 35 and Kotlin 1.9+.
+          sed -i '/org.jetbrains.kotlin.android/c\    id "org.jetbrains.kotlin.android" version "1.9.25" apply false' android/settings.gradle
+          sed -i 's/compileSdk = flutter.compileSdkVersion/compileSdk = 35/' android/app/build.gradle
+          sed -i 's/compileSdk flutter.compileSdkVersion/compileSdk 35/' android/app/build.gradle
       - run: flutter pub get
       - run: flutter analyze
       - run: flutter test
