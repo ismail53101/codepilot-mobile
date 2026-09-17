@@ -12,6 +12,8 @@ jobs:
           flutter-version: "3.24.0"
           channel: stable
       - uses: android-actions/setup-android@v3
+        with:
+          accept-android-sdk-licenses: true
       - run: flutter create . --org com.codepilot --project-name codepilot_mobile
       - name: Configure Android build compatibility
         run: |
