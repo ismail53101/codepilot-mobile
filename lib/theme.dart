@@ -1,0 +1,79 @@
+import 'package:flutter/material.dart';
+
+/// App-wide dark theme (Android-first).
+class AppTheme {
+  static const bg = Color(0xFF0D1117);
+  static const surface = Color(0xFF161B22);
+  static const surface2 = Color(0xFF1C2330);
+  static const border = Color(0xFF2D333B);
+  static const text = Color(0xFFE6EDF3);
+  static const muted = Color(0xFF8B949E);
+  static const accent = Color(0xFF3B82F6);
+  static const ok = Color(0xFF2EA043);
+  static const warn = Color(0xFFD29922);
+  static const err = Color(0xFFF85149);
+
+  static ThemeData dark() {
+    final base = ThemeData.dark(useMaterial3: true);
+    return base.copyWith(
+      scaffoldBackgroundColor: bg,
+      colorScheme: base.colorScheme.copyWith(
+        primary: accent,
+        secondary: accent,
+        surface: surface,
+        error: err,
+      ),
+      appBarTheme: const AppBarTheme(
+        backgroundColor: surface,
+        foregroundColor: text,
+        elevation: 0,
+        centerTitle: false,
+      ),
+      cardTheme: CardThemeData(
+        color: surface,
+        elevation: 0,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(12),
+          side: const BorderSide(color: border),
+        ),
+      ),
+      inputDecorationTheme: InputDecorationTheme(
+        filled: true,
+        fillColor: bg,
+        hintStyle: const TextStyle(color: muted),
+        labelStyle: const TextStyle(color: muted),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(10),
+          borderSide: const BorderSide(color: border),
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(10),
+          borderSide: const BorderSide(color: border),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(10),
+          borderSide: const BorderSide(color: accent),
+        ),
+      ),
+      elevatedButtonTheme: ElevatedButtonThemeData(
+        style: ElevatedButton.styleFrom(
+          backgroundColor: accent,
+          foregroundColor: Colors.white,
+          minimumSize: const Size(64, 44),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        ),
+      ),
+      outlinedButtonTheme: OutlinedButtonThemeData(
+        style: OutlinedButton.styleFrom(
+          foregroundColor: text,
+          side: const BorderSide(color: border),
+          minimumSize: const Size(64, 44),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        ),
+      ),
+      listTileTheme: const ListTileThemeData(iconColor: muted),
+      dividerColor: border,
+      snackBarTheme: const SnackBarThemeData(behavior: SnackBarBehavior.floating),
+    );
+  }
+}

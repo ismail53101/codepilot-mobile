@@ -1,0 +1,27 @@
+name: codepilot_mobile
+description: CodePilot Mobile — an AI coding agent for Android that works on your own OpenAI-compatible API and your own project ZIPs.
+publish_to: "none"
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  archive: ^3.4.10          # ZIP import / export
+  file_picker: ^8.0.3       # pick ZIP from Android storage
+  flutter_secure_storage: ^9.2.2  # API key at rest (Keystore-backed)
+  http: ^1.2.1              # OpenAI-compatible client with SSE streaming
+  path_provider: ^2.1.3     # local project workspace
+  shared_preferences: ^2.2.3  # non-secret settings
+  share_plus: ^9.0.0        # share exported ZIP
+  path: ^1.9.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true

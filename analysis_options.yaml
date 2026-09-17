@@ -1,0 +1,6 @@
+include: package:flutter_lints/flutter.yaml
+
+linter:
+  rules:
+    avoid_print: true       # never print; protects against key leakage into logs
+    prefer_single_quotes: true
