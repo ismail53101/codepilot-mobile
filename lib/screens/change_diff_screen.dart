@@ -14,7 +14,7 @@ class ChangeDiffScreen extends StatelessWidget {
     if (arg is! Map) {
       return Scaffold(appBar: AppBar(title: const Text('Diff')), body: const Center(child: Text('No change provided.')));
     }
-    final map = arg as Map;
+    final map = arg;
     final path = map['path'] as String;
     final kind = map['kind'] as String;
     final diff = (map['diff'] as List).cast<DiffLine>();

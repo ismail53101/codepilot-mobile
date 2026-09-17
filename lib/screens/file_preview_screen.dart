@@ -24,7 +24,7 @@ class _FilePreviewScreenState extends State<FilePreviewScreen> {
     final arg = ModalRoute.of(context)?.settings.arguments;
     if (arg is String) _load(arg);
     if (arg is Map) {
-      final map = arg as Map;
+      final map = arg;
       _load(map['path'] as String, highlightLine: map['line'] as int?);
     }
   }
