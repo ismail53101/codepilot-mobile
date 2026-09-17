@@ -15,9 +15,19 @@ jobs:
       - name: Configure Android build compatibility
         run: |
           # Current Flutter plugins require Android SDK 35 and Kotlin 1.9+.
+          # AGP 8.6/Gradle 8.7 use an aapt2 version that understands SDK 35.
+          sed -i '/com.android.application/c\    id "com.android.application" version "8.6.1" apply false' android/settings.gradle
           sed -i '/org.jetbrains.kotlin.android/c\    id "org.jetbrains.kotlin.android" version "1.9.25" apply false' android/settings.gradle
+          sed -i 's#distributionUrl=.*#distributionUrl=https\\://services.gradle.org/distributions/gradle-8.7-bin.zip#' android/gradle/wrapper/gradle-wrapper.properties
           sed -i 's/compileSdk = flutter.compileSdkVersion/compileSdk = 35/' android/app/build.gradle
           sed -i 's/compileSdk flutter.compileSdkVersion/compileSdk 35/' android/app/build.gradle
+          sed -i 's/buildToolsVersion = flutter.buildToolsVersion/buildToolsVersion = "35.0.0"/' android/app/build.gradle
+          sed -i 's/buildToolsVersion flutter.buildToolsVersion/buildToolsVersion "35.0.0"/' android/app/build.gradle
+      - name: Install Android SDK 35 toolchain
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager --uninstall "platforms;android-35" || true
+          sdkmanager "platforms;android-35" "build-tools;35.0.0"
       - run: flutter pub get
       - run: flutter analyze
       - run: flutter test
