@@ -4,3 +4,9 @@ linter:
   rules:
     avoid_print: true       # never print; protects against key leakage into logs
     prefer_single_quotes: true
+    # These are advisory style rules. Keep analyzer output focused on errors,
+    # warnings, and security-relevant lints for the CI build.
+    prefer_const_constructors: false
+    prefer_interpolation_to_compose_strings: false
+    prefer_function_declarations_over_variables: false
+    unnecessary_cast: false
