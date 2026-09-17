@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../agent_service.dart';
 import '../api_client.dart';
+import '../github_service.dart';
 import '../main.dart';
 import '../models.dart';
 import '../project_service.dart';
@@ -26,10 +27,6 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _send() async {
     final text = _input.text.trim();
     if (text.isEmpty || _busy) return;
-    if (projectService.projectName == null) {
-      _push('system', 'Open or import a project first (Home → Import Project).', isError: true);
-      return;
-    }
     setState(() {
       _messages.add(ChatMessage(role: 'user', content: text));
       _busy = true;
@@ -37,7 +34,9 @@ class _ChatScreenState extends State<ChatScreen> {
     _input.clear();
 
     try {
-      final context = agentService.buildContext(request: text);
+      final context = projectService.projectName == null
+          ? agentService.buildGeneralContext(request: text)
+          : agentService.buildContext(request: text);
       final history = _messages.length > 10
           ? _messages.sublist(_messages.length - 10)
           : _messages;
@@ -109,10 +108,25 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  Future<void> _publishToGitHub() async {
+    final repo = await githubProjectStore.load();
+    if (repo == null) {
+      _push('system', 'Connect and import a GitHub repository first from Home → GitHub.', isError: true);
+      return;
+    }
+    try {
+      final message = await githubService.publishChanges(repo, agentService.history);
+      _push('system', message);
+    } on GitHubException catch (e) {
+      _push('system', e.message, isError: true);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text('Chat · ${projectService.projectName ?? 'no project'}'), actions: [
+      appBar: AppBar(title: Text('Chat · ${projectService.projectName ?? 'general'}'), actions: [
+        IconButton(icon: const Icon(Icons.cloud_upload), tooltip: 'Publish confirmed changes to GitHub', onPressed: _publishToGitHub),
         IconButton(icon: const Icon(Icons.undo), tooltip: 'Undo latest change', onPressed: () {
           final rec = agentService.undoLast();
           _push('system', rec == null ? 'Nothing to undo.' : 'Undone: ${rec.kind} ${rec.path}');
@@ -126,7 +140,9 @@ class _ChatScreenState extends State<ChatScreen> {
             padding: const EdgeInsets.all(12),
             children: [
               if (_messages.isEmpty)
-                Text('Ask things like:\n• Explain this project\n• Where is the API configured?\n• Fix the Flutter build error\n• Create a new screen',
+                Text(projectService.projectName == null
+                    ? 'Ask anything about coding, architecture, APIs, debugging, or how to build your app.\n\nImport a project or connect GitHub when you want CodePilot to inspect and edit files.'
+                    : 'Ask things like:\n• Explain this project\n• Where is the API configured?\n• Fix the Flutter build error\n• Create a new screen',
                     style: TextStyle(color: AppTheme.muted)),
               for (final m in _messages) _bubble(m),
               if (_streamBuf != null) _bubble(ChatMessage(role: 'assistant', content: '$_streamBuf▍')),

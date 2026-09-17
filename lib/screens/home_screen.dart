@@ -113,6 +113,7 @@ class _HomeScreenState extends State<HomeScreen> {
               _action(context, Icons.upload_file, 'Import ZIP', '/import'),
               _action(context, Icons.folder, 'Explorer', '/explorer'),
               _action(context, Icons.chat, 'AI Chat', '/chat'),
+              _action(context, Icons.code, 'GitHub', '/github'),
               _action(context, Icons.search, 'Search', '/search'),
               _action(context, Icons.build, 'Build', '/build'),
               _action(context, Icons.save_alt, 'Export ZIP', '/export'),

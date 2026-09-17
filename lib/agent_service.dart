@@ -171,7 +171,15 @@ class AgentService {
     return buf.toString();
   }
 
-  static const systemPrompt = '''You are CodePilot, a coding agent working on the user's project.
+  String buildGeneralContext({required String request}) => '''PROJECT: none imported
+There is no local project open. Answer general coding questions, explain concepts,
+help plan an implementation, or provide guidance. Do not emit codepilot write/delete
+blocks because there is no project file system to modify.
+
+USER REQUEST: $request
+CURRENT DATE: 2026-09-17''';
+
+  static const systemPrompt = '''You are CodePilot, a coding agent working with the user's project when one is open.
 You receive PROJECT context (structure + relevant files) and the user's request.
 Rules:
 - Answer with a short explanation first, then, when code changes are needed, output changes in this exact block format so the app can apply them:
@@ -183,6 +191,7 @@ Rules:
 - Write COMPLETE file contents (not snippets) for write blocks.
 - Never invent file contents you have not seen; use the provided context only.
 - Never include API keys or secrets in code.
+- If PROJECT: none imported, answer as a helpful general coding assistant and do not output change blocks.
 - Keep explanations concise.''';
 
   /// Parse the model reply into text + proposed changes.

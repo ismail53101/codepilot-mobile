@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'agent_service.dart';
 import 'api_client.dart';
+import 'github_service.dart';
 import 'project_service.dart';
 import 'screens/api_settings_screen.dart';
 import 'screens/build_logs_screen.dart';
@@ -11,6 +12,7 @@ import 'screens/export_screen.dart';
 import 'screens/explorer_screen.dart';
 import 'screens/file_preview_screen.dart';
 import 'screens/home_screen.dart';
+import 'screens/github_screen.dart';
 import 'screens/import_screen.dart';
 import 'screens/search_results_screen.dart';
 import 'screens/settings_screen.dart';
@@ -27,6 +29,8 @@ final projectService = ProjectService();
 final settingsStore = SettingsStore();
 final apiClient = ApiClient(settingsStore);
 final agentService = AgentService(projectService);
+final githubService = GitHubService(settingsStore);
+final githubProjectStore = GitHubProjectStore(settingsStore);
 
 class CodePilotApp extends StatelessWidget {
   const CodePilotApp({super.key});
@@ -50,6 +54,7 @@ class CodePilotApp extends StatelessWidget {
         '/export': (_) => const ExportScreen(),
         '/settings': (_) => const SettingsScreen(),
         '/api': (_) => const ApiSettingsScreen(),
+        '/github': (_) => const GitHubScreen(),
       },
     );
   }
