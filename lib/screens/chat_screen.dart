@@ -5,6 +5,7 @@ import '../api_client.dart';
 import '../main.dart';
 import '../models.dart';
 import '../project_service.dart';
+import '../theme.dart';
 
 /// AI Coding Chat screen: command bar + streaming chat + confirm/diff flow.
 class ChatScreen extends StatefulWidget {

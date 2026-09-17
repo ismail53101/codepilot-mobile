@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-import '../project_service.dart';
+import '../models.dart';
 import '../theme.dart';
 
 /// Change Diff screen: before/after diff for one proposed change.

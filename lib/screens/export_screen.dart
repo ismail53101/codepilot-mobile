@@ -1,9 +1,11 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:cross_file/cross_file.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../main.dart';
+import '../models.dart';
 import '../project_service.dart';
 import '../theme.dart';
 
@@ -47,7 +49,8 @@ class _ExportScreenState extends State<ExportScreen> {
   Future<void> _share() async {
     if (_path == null) return;
     final box = context.findRenderObject() as RenderBox?;
-    await Share.shareXFiles([_path!], subject: 'CodePilot export', sharePositionOrigin: box!.localToGlobal(Offset.zero) & box.size);
+    if (box == null) return;
+    await Share.shareXFiles([XFile(_path!)], subject: 'CodePilot export', sharePositionOrigin: box.localToGlobal(Offset.zero) & box.size);
   }
 
   @override

@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../main.dart';
-import '../project_service.dart';
+import '../models.dart';
 import '../theme.dart';
 
 /// Search Results screen: full-text search across the open project.

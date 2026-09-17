@@ -229,7 +229,7 @@ class ProjectService {
     final dir = await projectsDir();
     final outPath = p.join(dir.path, '${_projectName}_export.zip');
     encoder.create(outPath);
-    await encoder.addDirectory(root, exclude: []);
+    await encoder.addDirectory(root);
     await encoder.close();
 
     // Rebuild the zip without excluded entries (archive package rewrite).
@@ -239,7 +239,7 @@ class ProjectService {
       final out = Archive();
       for (final f in decoded) {
         if (exclude.any(f.name.contains)) continue;
-        out.add(f);
+        out.addFile(f);
       }
       File(outPath).writeAsBytesSync(ZipEncoder().encode(out)!);
     }

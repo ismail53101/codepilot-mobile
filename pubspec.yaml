@@ -16,6 +16,7 @@ dependencies:
   path_provider: ^2.1.3     # local project workspace
   shared_preferences: ^2.2.3  # non-secret settings
   share_plus: ^9.0.0        # share exported ZIP
+  cross_file: ^0.3.4+2       # shared file type for share_plus
   path: ^1.9.0
 
 dev_dependencies:

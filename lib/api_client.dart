@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:http/http.dart' as http;
 
@@ -12,8 +13,6 @@ import 'stores.dart';
 class ApiClient {
   static const _maxAttempts = 3;
   static const _retryCap = Duration(seconds: 30);
-  static const _retryable = {429, 500, 502, 503, 504};
-
   final SettingsStore _store;
 
   ApiClient(this._store);

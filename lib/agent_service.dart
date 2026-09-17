@@ -175,11 +175,11 @@ class AgentService {
 You receive PROJECT context (structure + relevant files) and the user's request.
 Rules:
 - Answer with a short explanation first, then, when code changes are needed, output changes in this exact block format so the app can apply them:
-\`\`\`codepilot:write path/to/file.dart
+```codepilot:write path/to/file.dart
 <complete new file content>
-\`\`\`
-\`\`\`codepilot:delete path/to/file
-\`\`\`
+```
+```codepilot:delete path/to/file
+```
 - Write COMPLETE file contents (not snippets) for write blocks.
 - Never invent file contents you have not seen; use the provided context only.
 - Never include API keys or secrets in code.

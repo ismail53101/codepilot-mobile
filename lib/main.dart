@@ -8,6 +8,7 @@ import 'screens/build_logs_screen.dart';
 import 'screens/change_diff_screen.dart';
 import 'screens/chat_screen.dart';
 import 'screens/export_screen.dart';
+import 'screens/explorer_screen.dart';
 import 'screens/file_preview_screen.dart';
 import 'screens/home_screen.dart';
 import 'screens/import_screen.dart';

@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../api_client.dart';
 import '../main.dart';
-import '../project_service.dart';
+import '../models.dart';
 import '../stores.dart';
 import '../theme.dart';
 
@@ -145,7 +145,7 @@ class _ApiSettingsScreenState extends State<ApiSettingsScreen> {
               label: const Text('Save'))),
             const SizedBox(width: 12),
             Expanded(child: OutlinedButton.icon(onPressed: _testing ? null : _test,
-              icon: _testing ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.plug_circle),
+              icon: _testing ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.power),
               label: const Text('Test connection'))),
           ]),
           const SizedBox(height: 8),

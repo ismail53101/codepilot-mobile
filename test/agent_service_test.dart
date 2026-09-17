@@ -8,11 +8,11 @@ void main() {
     test('parses write and delete blocks from a model reply', () {
       const reply = '''
 I will add a config file and remove the old one.
-\`\`\`codepilot:write lib/config.dart
+```codepilot:write lib/config.dart
 const apiKeyPlaceholder = 'SET_ME';
-\`\`\`
-\`\`\`codepilot:delete lib/old_config.dart
-\`\`\`
+```
+```codepilot:delete lib/old_config.dart
+```
 Done.''';
       final parsed = AgentService.parseReply(reply);
       expect(parsed.changes.length, 2);
