@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 
 import '../main.dart';
-import '../project_service.dart';
 import '../theme.dart';
 
 /// Settings screen: storage info, change history management, about.

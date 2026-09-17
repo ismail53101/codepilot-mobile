@@ -151,7 +151,6 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Widget _bubble(ChatMessage m) {
     final isUser = m.role == 'user';
-    final isSystem = m.role == 'system';
     return Align(
       alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
       child: Container(

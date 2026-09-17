@@ -1,7 +1,6 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
-import 'package:cross_file/cross_file.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../main.dart';
@@ -30,7 +29,6 @@ class _ExportScreenState extends State<ExportScreen> {
     setState(() { _busy = true; _error = null; _path = null; });
     try {
       final path = await projectService.exportZip();
-      final f = File(path);
       final exclude = File('${projectService.root.path}/.codepilot_exclude');
       setState(() {
         _path = path;

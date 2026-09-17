@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import '../api_client.dart';
 import '../main.dart';
 import '../models.dart';
-import '../stores.dart';
+import '../project_service.dart';
 import '../theme.dart';
 
 /// Custom API Provider screen. The key goes to SecureStore (Android

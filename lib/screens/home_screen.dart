@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 
 import '../main.dart';
-import '../project_service.dart';
 import '../theme.dart';
 
 /// Home screen: project selector, command bar, quick actions, recent changes.
