@@ -11,6 +11,7 @@ jobs:
         with:
           flutter-version: "3.24.0"
           channel: stable
+      - uses: android-actions/setup-android@v3
       - run: flutter create . --org com.codepilot --project-name codepilot_mobile
       - name: Configure Android build compatibility
         run: |
@@ -25,9 +26,14 @@ jobs:
           sed -i 's/buildToolsVersion flutter.buildToolsVersion/buildToolsVersion "35.0.0"/' android/app/build.gradle
       - name: Install Android SDK 35 toolchain
         run: |
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager --uninstall "platforms;android-35" || true
-          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+          SDKMANAGER="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER="$(find "${ANDROID_HOME}/cmdline-tools" -type f -name sdkmanager -print -quit)"
+          fi
+          test -x "$SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" --uninstall "platforms;android-35" || true
+          "$SDKMANAGER" "platforms;android-35" "build-tools;35.0.0"
       - run: flutter pub get
       - run: flutter analyze
       - run: flutter test
