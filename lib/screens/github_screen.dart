@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../github_service.dart';
 import '../main.dart';
+import '../project_service.dart';
 import '../theme.dart';
 
 class GitHubScreen extends StatefulWidget {
