@@ -797,10 +797,138 @@ class _CodeBlock extends StatelessWidget {
         ]),
         Padding(
           padding: const EdgeInsets.fromLTRB(10, 0, 10, 10),
-          child: SelectableText(code,
-              style: const TextStyle(fontFamily: 'monospace', fontSize: 12, height: 1.5, color: AppTheme.text)),
+          child: _SyntaxHighlight(code: code, language: lang),
         ),
       ]),
+    );
+  }
+}
+
+/// One rule set per language: compiled regex + the ordered kind of each
+/// capture group (group i+1 corresponds to kinds[i]).
+class _LangRules {
+  final RegExp re;
+  final List<String> kinds;
+  const _LangRules(this.re, this.kinds);
+}
+
+/// ChatGPT-style syntax highlighting for code blocks: a regex tokenizer with
+/// per-language rules (comment style, HTML tags) and a One Dark-inspired
+/// palette — keywords purple, types yellow, strings green, numbers orange,
+/// functions blue, comments muted italic.
+class _SyntaxHighlight extends StatelessWidget {
+  final String code;
+  final String? language;
+
+  const _SyntaxHighlight({required this.code, required this.language});
+
+  static const _keywordColor = Color(0xFFC678DD);
+  static const _typeColor = Color(0xFFE5C07B);
+  static const _stringColor = Color(0xFF98C379);
+  static const _numberColor = Color(0xFFD19A66);
+  static const _commentColor = Color(0xFF8B949E);
+  static const _funcColor = Color(0xFF61AFEF);
+  static const _tagColor = Color(0xFFE06C75);
+
+  /// Union of common keywords across Dart/JS/TS/Java/Kotlin/Go/Python/C/C#.
+  /// A stray keyword from another language is visually harmless.
+  static const _keywords = [
+    'abstract','as','assert','async','await','base','break','case','catch',
+    'class','const','continue','covariant','default','deferred','do','dynamic',
+    'else','enum','export','extends','extension','external','factory','false',
+    'final','finally','for','function','get','if','implements','import','in',
+    'inline','interface','is','late','library','let','mixin','new','null','on',
+    'operator','override','part','private','protected','public','required',
+    'rethrow','return','sealed','set','show','static','super','switch','sync',
+    'this','throw','true','try','typedef','typeof','val','var','void','when',
+    'where','while','with','yield','def','elif','except','lambda','pass',
+    'raise','del','global','nonlocal','struct','impl','fn','match','use','pub',
+    'package','end','then','elsif','unless','nil','echo','foreach','elseif',
+    'include','namespace','using','template','typename','and','or','not',
+  ];
+
+  static final _cache = <String, _LangRules>{};
+
+  static _LangRules _rulesFor(String? lang) {
+    final key = (lang ?? '').trim().toLowerCase();
+    return _cache.putIfAbsent(key, () => _build(key));
+  }
+
+  static _LangRules _build(String l) {
+    const hashLangs = {
+      'python','py','sh','bash','zsh','shell','yaml','yml','ruby','rb','toml',
+      'perl','r','makefile','dockerfile','ini','properties','conf','ps1'
+    };
+    const markupLangs = {'html','xml','svg','vue'};
+    final stringRule = [
+      r'"""[\s\S]*?"""',
+      r"'''[\s\S]*?'''",
+      r'"(?:\\.|[^"\\\n])*"',
+      r"'(?:\\.|[^'\\\n])*'",
+    ].join('|');
+    final commentRule = markupLangs.contains(l)
+        ? r'<!--[\s\S]*?-->'
+        : hashLangs.contains(l)
+            ? r'#[^\n]*'
+            : r'//[^\n]*|/\*[\s\S]*?\*/';
+    final kinds = <String, String>{
+      'comment': commentRule,
+      'string': stringRule,
+      'number':
+          r'\b(?:0[xX][0-9a-fA-F_]+|\d[\d_]*(?:\.\d+)?(?:[eE][+-]?\d+)?)\b',
+      'annot': r'@[A-Za-z_]\w*',
+      'keyword': '\\b(?:${_keywords.join('|')})\\b',
+      'type': r'\b[A-Z][A-Za-z0-9_]*\b',
+      'func': r'\b[a-z_]\w*(?=\s*\()',
+      if (markupLangs.contains(l)) 'tag': r'</?[a-zA-Z][\w-]*',
+    };
+    final names = kinds.keys.toList();
+    final re = RegExp(kinds.values.map((p) => '($p)').join('|'));
+    return _LangRules(re, names);
+  }
+
+  TextSpan _span() {
+    final rules = _rulesFor(language);
+    final spans = <TextSpan>[];
+    var cursor = 0;
+    for (final m in rules.re.allMatches(code)) {
+      if (m.start > cursor) {
+        spans.add(TextSpan(text: code.substring(cursor, m.start)));
+      }
+      String? kind;
+      for (var i = 0; i < rules.kinds.length; i++) {
+        if (m.group(i + 1) != null) {
+          kind = rules.kinds[i];
+          break;
+        }
+      }
+      final style = switch (kind) {
+        'comment' => const TextStyle(
+            color: _commentColor, fontStyle: FontStyle.italic),
+        'string' => const TextStyle(color: _stringColor),
+        'number' => const TextStyle(color: _numberColor),
+        'annot' => const TextStyle(color: _typeColor),
+        'keyword' => const TextStyle(color: _keywordColor),
+        'type' => const TextStyle(color: _typeColor),
+        'func' => const TextStyle(color: _funcColor),
+        'tag' => const TextStyle(color: _tagColor),
+        _ => null,
+      };
+      spans.add(TextSpan(text: m[0], style: style));
+      cursor = m.end;
+    }
+    if (cursor < code.length) {
+      spans.add(TextSpan(text: code.substring(cursor)));
+    }
+    return TextSpan(children: spans);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SelectableText.rich(
+      _span(),
+      style: const TextStyle(
+          fontFamily: 'monospace', fontSize: 12, height: 1.5, color: AppTheme.text),
     );
   }
 }
