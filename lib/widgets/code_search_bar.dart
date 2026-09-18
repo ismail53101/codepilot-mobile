@@ -4,12 +4,22 @@ import 'package:flutter/material.dart';
 import '../theme.dart';
 import 'file_attachment_button.dart';
 
-/// Bottom command bar on the Home screen: one unified, neon-outlined
-/// container holding the [FileAttachmentButton], the [CodeSearchBar] input,
-/// and the [IntegrateButton] — visually a single component.
+/// How the Home command bar routes a submitted prompt.
+enum ComposerMode { ask, search }
+
+/// Bottom composer on the Home screen — ONE unified card, modern
+/// AI-assistant layout:
 ///
-/// Lives inside a SafeArea + viewInsets-aware wrapper so the keyboard and the
-/// Android gesture bar never overlap it.
+///   ┌──────────────────────────────────────┐
+///   │ ⚡ Ask CodePilot…                 [↑] │  ← input + primary action
+///   │ ──────────────────────────────────── │
+///   │ 📎 File · ⚡ Ask · 🔗 Integrate      │  ← quiet secondary row
+///   └──────────────────────────────────────┘
+///
+/// The neon outline + glow stays (CodePilot identity), but the interior is
+/// calm: no nested bordered boxes, no competing buttons. [IntegrateButton]
+/// and the mode chip are quiet text controls; only the circular send button
+/// is a filled action.
 class CodeSearchBar extends StatelessWidget {
   final TextEditingController controller;
   final FocusNode? focusNode;
@@ -18,6 +28,8 @@ class CodeSearchBar extends StatelessWidget {
   final ValueChanged<PlatformFile> onFilePicked;
   final ValueChanged<String>? onFileError;
   final Widget? attachmentStrip;
+  final ComposerMode mode;
+  final ValueChanged<ComposerMode> onModeChanged;
 
   const CodeSearchBar({
     super.key,
@@ -25,6 +37,8 @@ class CodeSearchBar extends StatelessWidget {
     required this.onSubmit,
     required this.onIntegrateTap,
     required this.onFilePicked,
+    required this.mode,
+    required this.onModeChanged,
     this.focusNode,
     this.onFileError,
     this.attachmentStrip,
@@ -42,34 +56,34 @@ class CodeSearchBar extends StatelessWidget {
           children: [
             if (attachmentStrip != null) attachmentStrip!,
             Container(
-              padding: const EdgeInsets.all(8),
+              padding: const EdgeInsets.fromLTRB(14, 6, 10, 6),
               decoration: BoxDecoration(
                 color: AppTheme.navyPanel,
-                borderRadius: BorderRadius.circular(20),
+                borderRadius: BorderRadius.circular(24),
                 border: Border.all(color: AppTheme.glowAccent, width: 1),
                 boxShadow: const [
                   BoxShadow(color: AppTheme.glowSoft, blurRadius: 18, spreadRadius: 1),
                 ],
               ),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.center,
-                children: [
-                  FileAttachmentButton(
-                    onFilePicked: onFilePicked,
-                    onError: onFileError,
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: _SearchField(
-                      controller: controller,
-                      focusNode: focusNode,
-                      onSubmit: onSubmit,
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  IntegrateButton(onTap: onIntegrateTap),
-                ],
-              ),
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                _ComposerInput(
+                  controller: controller,
+                  focusNode: focusNode,
+                  onSubmit: onSubmit,
+                ),
+                Divider(
+                  height: 10,
+                  thickness: 0.7,
+                  color: AppTheme.border.withOpacity(.7),
+                ),
+                _ComposerActions(
+                  onIntegrateTap: onIntegrateTap,
+                  onFilePicked: onFilePicked,
+                  onFileError: onFileError,
+                  mode: mode,
+                  onModeChanged: onModeChanged,
+                ),
+              ]),
             ),
           ],
         ),
@@ -78,13 +92,14 @@ class CodeSearchBar extends StatelessWidget {
   }
 }
 
-/// The rounded input field with the bolt icon and circular blue submit.
-class _SearchField extends StatelessWidget {
+/// Top row: multi-line input with a bolt prefix and one circular submit.
+/// Long text wraps up to 5 lines and the card grows with it.
+class _ComposerInput extends StatelessWidget {
   final TextEditingController controller;
   final FocusNode? focusNode;
   final ValueChanged<String> onSubmit;
 
-  const _SearchField({
+  const _ComposerInput({
     required this.controller,
     required this.onSubmit,
     this.focusNode,
@@ -92,57 +107,181 @@ class _SearchField extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      height: 56,
-      padding: const EdgeInsets.symmetric(horizontal: 12),
-      decoration: BoxDecoration(
-        color: AppTheme.bg,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: AppTheme.border),
-      ),
-      child: Row(children: [
-        const Icon(Icons.bolt, color: AppTheme.glowAccent, size: 22),
-        const SizedBox(width: 8),
-        Expanded(
-          child: TextField(
-            controller: controller,
-            focusNode: focusNode,
-            textInputAction: TextInputAction.send,
-            onSubmitted: onSubmit,
-            style: const TextStyle(color: AppTheme.text, fontSize: 15),
-            cursorColor: AppTheme.glowAccent,
-            decoration: const InputDecoration(
-              hintText: 'Ask, search, or build anything...',
-              border: InputBorder.none,
-              isDense: true,
+    return ListenableBuilder(
+      listenable: controller,
+      builder: (context, _) => Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          const Icon(Icons.bolt, color: AppTheme.glowAccent, size: 22),
+          const SizedBox(width: 8),
+          Expanded(
+            child: TextField(
+              controller: controller,
+              focusNode: focusNode,
+              minLines: 1,
+              maxLines: 5,
+              textInputAction: TextInputAction.newline,
+              textCapitalization: TextCapitalization.sentences,
+              style: const TextStyle(color: AppTheme.text, fontSize: 15, height: 1.35),
+              cursorColor: AppTheme.glowAccent,
+              decoration: const InputDecoration(
+                hintText: 'Ask CodePilot…',
+                hintStyle: TextStyle(fontSize: 15),
+                border: InputBorder.none,
+                isDense: true,
+                filled: false,
+              ),
             ),
           ),
-        ),
-        const SizedBox(width: 8),
-        _SubmitButton(onSubmit: () => onSubmit(controller.text)),
-      ]),
+          const SizedBox(width: 8),
+          // The single primary action: circular blue send. Fades in only
+          // when there is text, keeping the resting state calm.
+          AnimatedOpacity(
+            duration: const Duration(milliseconds: 150),
+            opacity: controller.text.trim().isEmpty ? 0.45 : 1.0,
+            child: _SendButton(
+              enabled: controller.text.trim().isNotEmpty,
+              onSubmit: () => onSubmit(controller.text),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
 
-/// Circular electric-blue search/submit button.
-class _SubmitButton extends StatelessWidget {
+/// Circular electric-blue send button (48dp touch target).
+class _SendButton extends StatelessWidget {
+  final bool enabled;
   final VoidCallback onSubmit;
 
-  const _SubmitButton({required this.onSubmit});
+  const _SendButton({required this.enabled, required this.onSubmit});
 
   @override
   Widget build(BuildContext context) {
     return Material(
       color: AppTheme.glowAccent,
-      borderRadius: BorderRadius.circular(14),
+      borderRadius: BorderRadius.circular(24),
       child: InkWell(
-        borderRadius: BorderRadius.circular(14),
-        onTap: onSubmit,
+        borderRadius: BorderRadius.circular(24),
+        onTap: enabled ? onSubmit : null,
         child: const SizedBox(
           width: 44,
           height: 44,
-          child: Icon(Icons.search, color: Colors.white, size: 22),
+          child: Icon(Icons.arrow_upward, color: Colors.white, size: 22),
+        ),
+      ),
+    );
+  }
+}
+
+/// Bottom row: quiet text+icon controls — File, mode toggle, Integrate.
+/// None of them look like raised buttons; they are 44dp+ touch targets.
+class _ComposerActions extends StatelessWidget {
+  final VoidCallback onIntegrateTap;
+  final ValueChanged<PlatformFile> onFilePicked;
+  final ValueChanged<String>? onFileError;
+  final ComposerMode mode;
+  final ValueChanged<ComposerMode> onModeChanged;
+
+  const _ComposerActions({
+    required this.onIntegrateTap,
+    required this.onFilePicked,
+    required this.onFileError,
+    required this.mode,
+    required this.onModeChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(children: [
+      FileAttachmentButton(
+        onFilePicked: onFilePicked,
+        onError: onFileError,
+        compact: true,
+      ),
+      const SizedBox(width: 4),
+      _ModeChip(mode: mode, onChanged: onModeChanged),
+      const Spacer(),
+      IntegrateButton(onTap: onIntegrateTap, compact: true),
+    ]);
+  }
+}
+
+/// Ask / Search routing toggle — a quiet segmented chip, not a button box.
+class _ModeChip extends StatelessWidget {
+  final ComposerMode mode;
+  final ValueChanged<ComposerMode> onChanged;
+
+  const _ModeChip({required this.mode, required this.onChanged});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: AppTheme.bg.withOpacity(.6),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        _ModeSegment(
+          selected: mode == ComposerMode.ask,
+          icon: Icons.auto_awesome,
+          label: 'Ask',
+          onTap: () => onChanged(ComposerMode.ask),
+        ),
+        _ModeSegment(
+          selected: mode == ComposerMode.search,
+          icon: Icons.search,
+          label: 'Search',
+          onTap: () => onChanged(ComposerMode.search),
+        ),
+      ]),
+    );
+  }
+}
+
+class _ModeSegment extends StatelessWidget {
+  final bool selected;
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+
+  const _ModeSegment({
+    required this.selected,
+    required this.icon,
+    required this.label,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      borderRadius: BorderRadius.circular(999),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(999),
+        onTap: onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 150),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          decoration: BoxDecoration(
+            color: selected ? AppTheme.glowSoft : Colors.transparent,
+            borderRadius: BorderRadius.circular(999),
+          ),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            Icon(icon,
+                size: 14,
+                color: selected ? AppTheme.glowAccent : AppTheme.muted),
+            const SizedBox(width: 4),
+            Text(
+              label,
+              style: TextStyle(
+                color: selected ? AppTheme.text : AppTheme.muted,
+                fontSize: 12,
+                fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
+              ),
+            ),
+          ]),
         ),
       ),
     );

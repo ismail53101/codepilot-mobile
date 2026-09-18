@@ -13,7 +13,7 @@ modified project.
 
 ## Screens
 
-Home (minimal: header + overflow menu + File/Search/Integrate bar) · Projects ·
+Home (minimal: header + overflow menu + unified Ask composer) · Projects ·
 Search History · Integrations · Help & Feedback · Import Project · Project
 Explorer · AI Coding Chat (persistent sessions, resumable, copyable code
 blocks) · Search Results · File Preview (copy + Ask-AI) · Change Diff ·
@@ -53,8 +53,35 @@ flutter build apk --debug      # output: build/app/outputs/flutter-apk/app-debug
 
 1. Push this folder to a GitHub repository.
 2. The included `.github/workflows/flutter-build.yml` runs on every push:
-   pub get → analyze → test → `flutter build apk --debug` → upload artifact.
-3. Download `app-debug-apk` from the workflow run's Artifacts.
+   pub get → analyze → test → debug APK → **small per-ABI release APKs** →
+   (when signing is configured) a signed Play **App Bundle**.
+3. Download artifacts from the workflow run: `app-release-apks` for a small
+   sideload install (use `app-arm64-v8a-release.apk` on modern phones).
+
+### Google Play upload signing (optional, for publishing)
+
+Create a keystore once, locally:
+
+```bash
+keytool -genkey -v -keystore upload-keystore.jks -keyalg RSA \
+    -keysize 2048 -validity 10000 -alias upload
+base64 -w0 upload-keystore.jks   # macOS: base64 -i upload-keystore.jks
+```
+
+Add four repository **secrets** (Settings → Secrets and variables → Actions):
+
+| Secret | Value |
+|---|---|
+| `KEYSTORE_BASE64` | the base64 string from the command above |
+| `KEYSTORE_PASSWORD` | keystore password you chose |
+| `KEY_ALIAS` | `upload` |
+| `KEY_PASSWORD` | key password you chose |
+
+With the secrets present, release APKs are signed with your upload key and
+the workflow additionally produces `app-release-aab` for Play Console.
+Without them, release APKs are debug-signed (fine for sideloading).
+**Back up the keystore file and passwords** — Google requires the same key
+for every update of the app.
 
 ## Sign-in options
 
@@ -62,8 +89,13 @@ Integrations → GitHub → **Sign in** offers two methods:
 
 1. **Sign in with GitHub** — the official OAuth device flow. The app shows
    the one-time code on a big card (copy button + "Open GitHub"); enter it
-   at github.com/login/device. This is the only way GitHub itself allows
-   sign-in without a redirect server — GitHub does not offer email OTP.
+   at github.com/login/device. Polling honors GitHub's interval, survives
+   transient connection drops while the app is backgrounded (explicit
+   timeouts + bounded retries), is cancelled cleanly when the sheet closes,
+   and the token is verified via `GET /user` before GitHub shows
+   **Connected** with your username/avatar. This is the only way GitHub
+   itself allows sign-in without a redirect server — GitHub does not offer
+   email OTP.
 2. **Sign in with email** — CodePilot's own one-time-code sign-in. Requires
    a [Resend](https://resend.com) API key:
    - Local/CI builds: `flutter build apk --debug --dart-define=RESEND_API_KEY=re_…`

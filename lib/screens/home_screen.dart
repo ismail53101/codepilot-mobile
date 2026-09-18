@@ -23,6 +23,7 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   final _command = TextEditingController();
   final _searchFocus = FocusNode();
+  ComposerMode _mode = ComposerMode.ask;
   PlatformFile? _attachment;
   String? _attachmentContent;
 
@@ -101,14 +102,6 @@ class _HomeScreenState extends State<HomeScreen> {
     // Record every submitted query for the Search History screen.
     searchHistoryStore.add(text);
 
-    // Route obvious search-style requests to project search; everything
-    // else goes to the AI chat.
-    final lower = text.toLowerCase();
-    final isSearch = lower.startsWith('find') ||
-        lower.startsWith('where') ||
-        lower.contains('search for') ||
-        lower.contains('search my project');
-
     final attachment = _attachment;
     final content = _attachmentContent;
     final attachmentName = attachment?.name;
@@ -117,6 +110,9 @@ class _HomeScreenState extends State<HomeScreen> {
       _attachmentContent = null;
     });
 
+    // Explicit mode wins; Ask stays on chat. Search with no open project
+    // falls back to chat (nothing to search yet).
+    final isSearch = _mode == ComposerMode.search;
     if (isSearch && projectService.projectName != null) {
       Navigator.pushNamed(
         context,
@@ -185,6 +181,8 @@ class _HomeScreenState extends State<HomeScreen> {
             controller: _command,
             focusNode: _searchFocus,
             onSubmit: _runCommand,
+            mode: _mode,
+            onModeChanged: (m) => setState(() => _mode = m),
             onIntegrateTap: () => Navigator.pushNamed(context, '/integrations'),
             onFilePicked: _onFilePicked,
             onFileError: (message) => ScaffoldMessenger.of(context)

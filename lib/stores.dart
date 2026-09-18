@@ -80,6 +80,31 @@ class SettingsStore {
     await prefs.remove('codepilot_email_identity');
   }
 
+  /// Non-secret GitHub identity for UI display ("Connected as …").
+  Future<Map<String, String?>> loadGitHubIdentity() async {
+    final prefs = await SharedPreferences.getInstance();
+    return {
+      'login': prefs.getString('github_identity_login'),
+      'avatarUrl': prefs.getString('github_identity_avatar'),
+    };
+  }
+
+  Future<void> saveGitHubIdentity(String login, String? avatarUrl) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('github_identity_login', login);
+    if (avatarUrl == null) {
+      await prefs.remove('github_identity_avatar');
+    } else {
+      await prefs.setString('github_identity_avatar', avatarUrl);
+    }
+  }
+
+  Future<void> clearGitHubIdentity() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('github_identity_login');
+    await prefs.remove('github_identity_avatar');
+  }
+
   Future<Map<String, String?>> loadGitHubProject() async {
     final prefs = await SharedPreferences.getInstance();
     return {

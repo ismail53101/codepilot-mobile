@@ -13,9 +13,12 @@ void main() {
     expect(spans.length, 2);
     expect((spans[0] as TextSpan).text, 'Code');
     expect((spans[1] as TextSpan).text, 'Pilot');
-    // Bottom command bar pieces are present on Home.
+    // Unified composer: quiet actions row + circular send button.
     expect(find.text('File'), findsOneWidget);
     expect(find.text('Integrate'), findsOneWidget);
+    expect(find.text('Ask'), findsOneWidget);
+    expect(find.text('Search'), findsOneWidget);
+    expect(find.byIcon(Icons.arrow_upward), findsOneWidget);
     // No project cards, quick-action grid, or recent-changes list on Home.
     expect(find.text('Import ZIP'), findsNothing);
     expect(find.text('Recent changes'), findsNothing);
@@ -46,9 +49,9 @@ void main() {
     expect(find.text('App preferences'), findsNothing);
   });
 
-  testWidgets('typing a command shows the search field', (tester) async {
+  testWidgets('typing a command shows the composer input', (tester) async {
     await tester.pumpWidget(const CodePilotApp());
-    expect(find.text('Ask, search, or build anything...'), findsOneWidget);
+    expect(find.text('Ask CodePilot…'), findsOneWidget);
     await tester.enterText(find.byType(TextField), 'Find the login screen');
     await tester.pump();
     expect(find.text('Find the login screen'), findsOneWidget);

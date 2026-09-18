@@ -27,6 +27,47 @@ jobs:
           sed -i 's/compileSdk flutter.compileSdkVersion/compileSdk 35/' android/app/build.gradle
           sed -i 's/buildToolsVersion = flutter.buildToolsVersion/buildToolsVersion = "35.0.0"/' android/app/build.gradle
           sed -i 's/buildToolsVersion flutter.buildToolsVersion/buildToolsVersion "35.0.0"/' android/app/build.gradle
+          # INTERNET permission in the MAIN manifest (debug manifests have it
+          # by default; release APKs would lose device flow + API access).
+          grep -q 'android.permission.INTERNET' android/app/src/main/AndroidManifest.xml || sed -i 's#<application#<uses-permission android:name="android.permission.INTERNET"/>\n    <application#' android/app/src/main/AndroidManifest.xml
+      # Google Play upload signing: decode the keystore from the
+      # KEYSTORE_BASE64 secret and write android/key.properties for Gradle.
+      # Without these secrets, release builds fall back to debug signing
+      # (fine for sideloading, not for Play).
+      - name: Decode upload keystore (if repository secrets are configured)
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 --decode > android/app/upload-keystore.jks
+            cat > android/key.properties <<EOF
+          storeFile=upload-keystore.jks
+          storePassword=$KEYSTORE_PASSWORD
+          keyAlias=$KEY_ALIAS
+          keyPassword=$KEY_PASSWORD
+          EOF
+            echo "KEYSTORE_SET=true" >> "$GITHUB_ENV"
+            echo "Upload keystore configured — release builds will be signed with it."
+          else
+            echo "KEYSTORE_BASE64 not set — release builds fall back to debug signing."
+          fi
+      # key.properties alone is not enough because android/ is regenerated
+      # every run: patch the generated app/build.gradle to add the signing
+      # config and use it for release builds (debug fallback preserved).
+      - name: Wire upload-keystore signing into Gradle (when key.properties exists)
+        run: |
+          if [ -f android/key.properties ]; then
+            grep -q keystorePropertiesFile android/app/build.gradle || sed -i '0,/^android {/s//def keystoreProperties = new Properties()\ndef keystorePropertiesFile = rootProject.file("key.properties")\nif (keystorePropertiesFile.exists()) {\n    keystoreProperties.load(new FileInputStream(keystorePropertiesFile))\n}\nandroid {/' android/app/build.gradle
+            grep -q 'signingConfigs' android/app/build.gradle || sed -i '0,/^android {$/s//android {\n    signingConfigs {\n        if (keystorePropertiesFile.exists()) {\n            upload {\n                keyAlias keystoreProperties["keyAlias"]\n                keyPassword keystoreProperties["keyPassword"]\n                storeFile file(keystoreProperties["storeFile"])\n                storePassword keystoreProperties["storePassword"]\n            }\n        }\n    }/' android/app/build.gradle
+            sed -i 's/signingConfig = signingConfigs.debug/signingConfig = keystorePropertiesFile.exists() ? signingConfigs.upload : signingConfigs.debug/' android/app/build.gradle
+            sed -i 's/signingConfig signingConfigs.debug/signingConfig = keystorePropertiesFile.exists() ? signingConfigs.upload : signingConfigs.debug/' android/app/build.gradle
+            echo "Gradle release signing: upload keystore (debug fallback kept)."
+          else
+            echo "No key.properties — keeping template debug signing."
+          fi
       - name: Install Android SDK 35 toolchain
         run: |
           SDKMANAGER="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
@@ -53,3 +94,37 @@ jobs:
         with:
           name: app-debug-apk
           path: build/app/outputs/flutter-apk/app-debug.apk
+      # Small installable release APKs: AOT-compiled + one ABI per file.
+      # The default Flutter template signs release builds with the debug
+      # keystore, so these install directly on a device.
+      - name: Build release APKs (small, one per device architecture)
+        run: |
+          ARGS=""
+          if [ -n "$RESEND_API_KEY" ]; then
+            ARGS="--dart-define=RESEND_API_KEY=$RESEND_API_KEY"
+          fi
+          flutter build apk --release --split-per-abi $ARGS
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-release-apks
+          path: build/app/outputs/flutter-apk/app-*-release.apk
+      # Google Play accepts only signed App Bundles — build one only when
+      # the upload keystore is configured (a debug-signed AAB is not usable
+      # for a first Play upload).
+      - name: Build Play App Bundle (when upload keystore is configured)
+        if: env.KEYSTORE_SET == 'true'
+        run: |
+          ARGS=""
+          if [ -n "$RESEND_API_KEY" ]; then
+            ARGS="--dart-define=RESEND_API_KEY=$RESEND_API_KEY"
+          fi
+          flutter build appbundle --release $ARGS
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+      - uses: actions/upload-artifact@v4
+        if: env.KEYSTORE_SET == 'true'
+        with:
+          name: app-release-aab
+          path: build/app/outputs/bundle/release/app-release.aab

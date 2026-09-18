@@ -17,9 +17,14 @@ class _GitHubScreenState extends State<GitHubScreen> {
   List<GitHubRepo> _repos = [];
   GitHubRepo? _selected;
   String? _emailIdentity;
+  String? _ghLogin;
+  String? _ghAvatarUrl;
   String? _message;
   bool _busy = false;
   bool _hidden = true;
+
+  /// Whether a GitHub token exists in secure storage.
+  bool get _ghConnected => _ghLogin != null;
 
   @override
   void initState() {
@@ -30,10 +35,25 @@ class _GitHubScreenState extends State<GitHubScreen> {
   Future<void> _loadSelected() async {
     final repo = await githubProjectStore.load();
     final email = await settingsStore.readEmailIdentity();
+    var login = (await settingsStore.loadGitHubIdentity())['login'];
+    // Token present but identity missing (e.g. old install): re-verify once.
+    if (login == null) {
+      final token = await githubService.readToken();
+      if (token != null && token.isNotEmpty) {
+        try {
+          final identity = await githubService.fetchAuthenticatedUser();
+          await settingsStore.saveGitHubIdentity(identity.login, identity.avatarUrl);
+          login = identity.login;
+        } on GitHubException {
+          // Bad/expired token — leave disconnected; user can sign in again.
+        }
+      }
+    }
     if (!mounted) return;
     setState(() {
       _selected = repo;
       _emailIdentity = email;
+      _ghLogin = login;
     });
   }
 
@@ -46,9 +66,16 @@ class _GitHubScreenState extends State<GitHubScreen> {
     setState(() { _busy = true; _message = null; });
     try {
       await githubService.saveToken(token);
+      final identity = await githubService.fetchAuthenticatedUser();
+      await settingsStore.saveGitHubIdentity(identity.login, identity.avatarUrl);
       final repos = await githubService.listRepos();
       if (!mounted) return;
-      setState(() { _repos = repos; _message = 'Connected. Select a repository below.'; });
+      setState(() {
+        _repos = repos;
+        _ghLogin = identity.login;
+        _ghAvatarUrl = identity.avatarUrl;
+        _message = 'Connected as ${identity.login}.';
+      });
       _token.clear();
     } on GitHubException catch (e) {
       if (mounted) setState(() => _message = e.message);
@@ -67,8 +94,16 @@ class _GitHubScreenState extends State<GitHubScreen> {
         if (mounted) setState(() => _message = null);
         return;
       }
+      final identity = await settingsStore.loadGitHubIdentity();
       final repos = await githubService.listRepos();
-      if (mounted) setState(() { _repos = repos; _message = 'GitHub connected. Select a repository.'; });
+      if (mounted) {
+        setState(() {
+          _repos = repos;
+          _ghLogin = identity['login'];
+          _ghAvatarUrl = identity['avatarUrl'];
+          _message = 'GitHub connected as ${identity['login'] ?? 'user'}.';
+        });
+      }
     } on GitHubException catch (e) {
       if (mounted) setState(() => _message = e.message);
     } finally {
@@ -185,37 +220,79 @@ class _GitHubScreenState extends State<GitHubScreen> {
     await githubService.deleteToken();
     await githubProjectStore.clear();
     await settingsStore.clearEmailIdentity();
-    if (mounted) setState(() { _repos = []; _selected = null; _emailIdentity = null; _message = 'Disconnected.'; });
+    await settingsStore.clearGitHubIdentity();
+    if (mounted) {
+      setState(() {
+        _repos = [];
+        _selected = null;
+        _emailIdentity = null;
+        _ghLogin = null;
+        _ghAvatarUrl = null;
+        _message = 'Disconnected.';
+      });
+    }
   }
 
   @override
   Widget build(BuildContext context) => Scaffold(
         appBar: AppBar(title: const Text('GitHub Integration'), actions: [
-          IconButton(onPressed: _busy ? null : _refresh, icon: const Icon(Icons.refresh)),
+          IconButton(
+              onPressed: (_busy || !_ghConnected) ? null : _refresh,
+              icon: const Icon(Icons.refresh)),
           IconButton(onPressed: _busy ? null : _disconnect, icon: const Icon(Icons.link_off)),
         ]),
         body: ListView(padding: const EdgeInsets.all(16), children: [
-          if (_emailIdentity != null) Card(
+          // ---- Connection state card: Disconnected / Connecting / Connected
+          Card(
             color: AppTheme.surface2,
             child: ListTile(
-              leading: const Icon(Icons.alternate_email, color: AppTheme.ok),
-              title: Text(_emailIdentity!),
-              subtitle: const Text('Email verified'),
+              leading: _ghConnected
+                  ? CircleAvatar(
+                      backgroundColor: AppTheme.navyPanel,
+                      backgroundImage:
+                          _ghAvatarUrl != null ? NetworkImage(_ghAvatarUrl!) : null,
+                      child: _ghAvatarUrl == null
+                          ? const Icon(Icons.person, color: AppTheme.muted, size: 20)
+                          : null,
+                    )
+                  : const Icon(Icons.link_off, color: AppTheme.muted),
+              title: Text(
+                _ghConnected ? 'Connected' : 'Disconnected',
+                style: TextStyle(
+                  color: _ghConnected ? AppTheme.ok : AppTheme.muted,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              subtitle: Text(
+                _ghConnected
+                    ? 'Signed in as $_ghLogin'
+                    : _busy
+                        ? 'Connecting…'
+                        : 'Sign in to access your repositories',
+                style: const TextStyle(color: AppTheme.muted, fontSize: 12),
+              ),
+              trailing: _ghConnected
+                  ? const Icon(Icons.check_circle, color: AppTheme.ok)
+                  : FilledButton(
+                      onPressed: _busy ? null : _showSigninOptions,
+                      child: const Text('Sign in')),
             ),
           ),
           if (_selected != null) Card(color: AppTheme.surface2, child: ListTile(leading: const Icon(Icons.cloud_done, color: AppTheme.ok), title: Text(_selected!.fullName), subtitle: Text('Default branch: ${_selected!.defaultBranch}'))),
           Card(child: Padding(padding: const EdgeInsets.all(16), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             const Text('Connect GitHub', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 18)),
             const SizedBox(height: 8),
-            Text('Sign in securely with GitHub. Your authorization token is stored only in Android secure storage.', style: TextStyle(color: AppTheme.muted, fontSize: 13)),
+            Text('Sign in securely with the device flow. Your authorization token is stored only in Android secure storage.', style: TextStyle(color: AppTheme.muted, fontSize: 13)),
             const SizedBox(height: 12),
             FilledButton.icon(onPressed: _busy ? null : _showSigninOptions, icon: const Icon(Icons.login), label: Text(_busy ? 'Working…' : 'Sign in')),
-            const SizedBox(height: 12),
-            const Center(child: Text('or connect with a token', style: TextStyle(fontSize: 12))),
-            const SizedBox(height: 8),
-            TextField(controller: _token, obscureText: _hidden, decoration: InputDecoration(labelText: 'Personal access token', hintText: 'github_pat_…', suffixIcon: IconButton(icon: Icon(_hidden ? Icons.visibility : Icons.visibility_off), onPressed: () => setState(() => _hidden = !_hidden)))),
-            const SizedBox(height: 12),
-            FilledButton.icon(onPressed: _busy ? null : _connect, icon: const Icon(Icons.login), label: Text(_busy ? 'Working…' : 'Connect and load repositories')),
+            if (!_ghConnected) ...[
+              const SizedBox(height: 12),
+              const Center(child: Text('or connect with a token', style: TextStyle(fontSize: 12))),
+              const SizedBox(height: 8),
+              TextField(controller: _token, obscureText: _hidden, decoration: InputDecoration(labelText: 'Personal access token', hintText: 'github_pat_…', suffixIcon: IconButton(icon: Icon(_hidden ? Icons.visibility : Icons.visibility_off), onPressed: () => setState(() => _hidden = !_hidden)))),
+              const SizedBox(height: 12),
+              FilledButton.icon(onPressed: _busy ? null : _connect, icon: const Icon(Icons.login), label: Text(_busy ? 'Working…' : 'Connect and load repositories')),
+            ],
           ]))),
           if (_message != null) Padding(padding: const EdgeInsets.all(12), child: Text(_message!, style: TextStyle(color: _message!.contains('failed') || _message!.contains('Enter') ? AppTheme.err : AppTheme.ok))),
           if (_repos.isNotEmpty) ...[

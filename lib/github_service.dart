@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
@@ -163,42 +164,179 @@ class GitHubService {
   /// Starts GitHub's OAuth device flow. The caller displays the user_code and
   /// opens verification_uri in a browser; this method polls until authorized.
   Future<({String userCode, String verificationUri, String deviceCode})> startDeviceFlow() async {
-    final response = await http.post(
-      Uri.parse('https://github.com/login/device/code'),
-      headers: {'Accept': 'application/json'},
-      body: {'client_id': githubOAuthClientId, 'scope': 'repo read:user'},
-    );
+    final http.Response response;
+    try {
+      response = await http
+          .post(
+            Uri.parse('https://github.com/login/device/code'),
+            headers: const {'Accept': 'application/json'},
+            body: {'client_id': githubOAuthClientId, 'scope': 'repo read:user'},
+          )
+          .timeout(const Duration(seconds: 20));
+    } on SocketException {
+      throw const GitHubException('No network connection. Check Wi-Fi/data and try again.');
+    } on http.ClientException catch (e) {
+      throw GitHubException(
+          'Could not reach github.com to start sign-in. Check your network (a VPN or proxy may block GitHub) and try again.\nDetail: ${e.message}');
+    } on HttpException {
+      throw const GitHubException('Connection to github.com failed. Try again.');
+    } on TimeoutException {
+      throw const GitHubException('github.com took too long to respond. Try again.');
+    }
     if (response.statusCode != 200) throw GitHubException(_error(response));
-    final data = jsonDecode(response.body) as Map<String, dynamic>;
+    final Map<String, dynamic> data;
+    try {
+      data = jsonDecode(response.body) as Map<String, dynamic>;
+    } on FormatException {
+      throw GitHubException(
+          'Unexpected response from GitHub (HTTP ${response.statusCode}).');
+    }
     return (
-      userCode: data['user_code'] as String,
-      verificationUri: data['verification_uri'] as String,
-      deviceCode: data['device_code'] as String,
+      userCode: (data['user_code'] as String?) ?? '',
+      verificationUri: (data['verification_uri'] as String?) ?? 'https://github.com/login/device',
+      deviceCode: (data['device_code'] as String?) ?? '',
     );
   }
 
-  Future<void> completeDeviceFlow(String deviceCode) async {
-    for (var attempt = 0; attempt < 60; attempt++) {
-      await Future.delayed(const Duration(seconds: 5));
-      final response = await http.post(
-        Uri.parse('https://github.com/login/oauth/access_token'),
-        headers: {'Accept': 'application/json'},
-        body: {'client_id': githubOAuthClientId, 'device_code': deviceCode, 'grant_type': 'urn:ietf:params:oauth:grant-type:device_code'},
-      );
-      final data = jsonDecode(response.body) as Map<String, dynamic>;
+  /// Polls GitHub's token endpoint until the user finishes authorization.
+  ///
+  /// Android networking notes:
+  /// - Every request gets an explicit [timeout]; the browser keeps the app in
+  ///   the background, so requests must never hang forever.
+  /// - A single transient transport failure (ClientException "Software caused
+  ///   connection abort", SocketException, HttpException) is retried after a
+  ///   short pause instead of killing the whole flow — the OS network stack
+  ///   routinely drops idle sockets while the app is backgrounded.
+  /// - Honors GitHub's `interval` (and `+1s` extra for slow_down) so polling
+  ///   is never aggressive.
+  /// - [isCancelled] is checked between every step; when the sheet closes the
+  ///   caller flips it and the loop returns promptly instead of running on in
+  ///   the background.
+  /// - On success the token is stored in secure storage and verified against
+  ///   `GET /user` before the flow reports connected.
+  Future<({String login, String? avatarUrl})> completeDeviceFlow(
+    String deviceCode, {
+    required Future<bool> Function() isCancelled,
+    void Function(String status)? onStatus,
+  }) async {
+    var interval = const Duration(seconds: 5); // GitHub default
+    const maxAttempts = 120; // ~10 min at the default interval
+
+    Future<http.Response?> pollOnce() async {
+      try {
+        final response = await http
+            .post(
+              Uri.parse('https://github.com/login/oauth/access_token'),
+              headers: const {'Accept': 'application/json'},
+              body: {
+                'client_id': githubOAuthClientId,
+                'device_code': deviceCode,
+                'grant_type': 'urn:ietf:params:oauth:grant-type:device_code',
+              },
+            )
+            .timeout(const Duration(seconds: 20));
+        return response;
+      } on http.ClientException {
+        return null; // transient transport failure — caller retries
+      } on SocketException {
+        return null;
+      } on HttpException {
+        return null;
+      } on TimeoutException {
+        return null; // slow network — treat like any other transient failure
+      }
+    }
+
+    var consecutiveTransportFailures = 0;
+    for (var attempt = 0; attempt < maxAttempts; attempt++) {
+      if (await isCancelled()) return (login: '', avatarUrl: null);
+
+      final response = await pollOnce();
+      if (await isCancelled()) return (login: '', avatarUrl: null);
+
+      if (response == null) {
+        consecutiveTransportFailures++;
+        if (consecutiveTransportFailures > 6) {
+          throw const GitHubException(
+              'Connection to github.com keeps failing. Check your network (VPN/proxy can block GitHub) and try again.');
+        }
+        onStatus?.call('Connection hiccup — retrying…');
+        await Future.delayed(const Duration(seconds: 3));
+        continue;
+      }
+      consecutiveTransportFailures = 0;
+
+      final Map<String, dynamic> data;
+      try {
+        data = jsonDecode(response.body) as Map<String, dynamic>;
+      } on FormatException {
+        throw GitHubException(
+            'Unexpected response from GitHub (HTTP ${response.statusCode}).');
+      }
+
       final token = data['access_token'] as String?;
       if (token != null && token.isNotEmpty) {
         await saveToken(token);
-        return;
+        onStatus?.call('Verifying your GitHub account…');
+        return await fetchAuthenticatedUser();
       }
+
       final error = data['error'] as String?;
-      if (error == 'access_denied' || error == 'expired_token') {
-        throw GitHubException('GitHub authorization was $error. Please try again.');
+      switch (error) {
+        case 'authorization_pending':
+          break; // expected while the user is authorizing
+        case 'slow_down':
+          interval += const Duration(seconds: 5); // GitHub: +5s on slow_down
+          break;
+        case 'expired_token':
+          throw const GitHubException(
+              'The device code expired. Start sign-in again to get a new code.');
+        case 'access_denied':
+          throw const GitHubException(
+              'Authorization was cancelled on github.com. Start again when ready.');
+        case 'incorrect_client_credentials':
+          throw const GitHubException(
+              'The app\'s GitHub client ID is invalid or was revoked. Report this bug.');
+        case 'incorrect_device_code':
+          throw const GitHubException(
+              'GitHub rejected the device code. Start sign-in again.');
+        case 'device_flow_disabled':
+          throw const GitHubException(
+              'The GitHub App does not allow device sign-in. Report this bug.');
+        default:
+          if (error != null) {
+            throw GitHubException('GitHub error: $error');
+          }
+        // No error and no token: malformed body — keep polling a little.
       }
-      // authorization_pending and slow_down are expected while the user acts.
-      if (error == 'slow_down') await Future.delayed(const Duration(seconds: 5));
+
+      await Future.delayed(interval);
     }
-    throw const GitHubException('GitHub authorization timed out. Please try again.');
+    throw const GitHubException(
+        'GitHub authorization timed out. Start again and enter the new code.');
+  }
+
+  /// Verifies the stored token by asking GitHub who it belongs to. Returns
+  /// the authenticated login and avatar URL (non-secret; safe to display).
+  Future<({String login, String? avatarUrl})> fetchAuthenticatedUser() async {
+    final headers = await _auth();
+    try {
+      final response = await http
+          .get(Uri.parse('https://api.github.com/user'), headers: headers)
+          .timeout(const Duration(seconds: 20));
+      if (response.statusCode != 200) throw GitHubException(_error(response));
+      final data = jsonDecode(response.body) as Map<String, dynamic>;
+      return (
+        login: (data['login'] as String?) ?? 'github-user',
+        avatarUrl: data['avatar_url'] as String?,
+      );
+    } on SocketException {
+      throw const GitHubException('No network connection while verifying the token.');
+    } on HttpException {
+      throw const GitHubException('Connection to api.github.com failed while verifying the token.');
+    } on TimeoutException {
+      throw const GitHubException('github.com verification timed out. Try again.');
+    }
   }
 
   Future<Map<String, String>> _auth() async {

@@ -33,13 +33,22 @@ class GitHubDeviceFlowSheet extends StatefulWidget {
 }
 
 class _GitHubDeviceFlowSheetState extends State<GitHubDeviceFlowSheet> {
+  String _loginCache = 'github user';
   String? _userCode;
   String? _deviceCode;
   String? _verificationUri;
   String? _error;
+  String? _technical;
+  String? _status;
   bool _copied = false;
   bool _waiting = false;
   bool _done = false;
+
+  /// Guards against two polling loops running at once (double taps).
+  bool _polling = false;
+  /// Flipped when the sheet is disposed so the polling loop stops promptly
+  /// instead of running in the background.
+  bool _cancelled = false;
 
   @override
   void initState() {
@@ -48,35 +57,69 @@ class _GitHubDeviceFlowSheetState extends State<GitHubDeviceFlowSheet> {
   }
 
   Future<void> _start() async {
-    setState(() => _error = null);
+    if (_polling) return; // never two flows at once
+    setState(() {
+      _error = null;
+      _technical = null;
+      _status = null;
+    });
     try {
       final flow = await githubService.startDeviceFlow();
       if (!mounted) return;
+      if (flow.userCode.isEmpty || flow.deviceCode.isEmpty) {
+        setState(() => _error = 'GitHub returned an empty device code. Try again.');
+        return;
+      }
       setState(() {
         _userCode = flow.userCode;
         _deviceCode = flow.deviceCode;
         _verificationUri = flow.verificationUri;
       });
+      // Auto-open github.com/login/device so a single tap on "Sign in with
+      // GitHub" takes the user straight to the verification page (code is
+      // copied first, so it can be pasted immediately). Chrome may be slow
+      // to appear on the first launch — a tiny delay avoids swallowed
+      // launch requests on some devices.
+      await Future<void>.delayed(const Duration(milliseconds: 350));
+      if (mounted) await _openGitHub();
       await _waitForAuthorization();
     } on GitHubException catch (e) {
       if (mounted) setState(() => _error = e.message);
     } catch (e) {
-      if (mounted) setState(() => _error = 'Could not start GitHub sign-in: $e');
+      // Unexpected (non-GitHubException) failure — show something useful and
+      // keep the technical detail visible for debugging.
+      if (mounted) {
+        setState(() {
+          _error = 'Could not start GitHub sign-in. Check your connection and try again.';
+          _technical = e.toString();
+        });
+      }
     }
   }
 
   Future<void> _waitForAuthorization() async {
+    if (_polling) return;
     setState(() => _waiting = true);
+    _polling = true;
     try {
-      // completeDeviceFlow stores the token on success and throws on
-      // denial/expiry/timeout.
-      await githubService.completeDeviceFlow(_deviceCode!);
+      // completeDeviceFlow stores the token, verifies it via GET /user, and
+      // returns the login; it throws GitHubException on denial/expiry/etc.
+      final identity = await githubService.completeDeviceFlow(
+        _deviceCode!,
+        isCancelled: () async => _cancelled || !mounted,
+        onStatus: (s) {
+          if (mounted) setState(() => _status = s);
+        },
+      );
+      if (!mounted) return;
+      await settingsStore.saveGitHubIdentity(identity.login, identity.avatarUrl);
       if (!mounted) return;
       setState(() {
         _waiting = false;
         _done = true;
+        _loginCache = identity.login;
       });
-      await Future.delayed(const Duration(milliseconds: 600));
+      await Future.delayed(const Duration(milliseconds: 700));
       if (mounted) Navigator.pop(context, true);
     } on GitHubException catch (e) {
       if (mounted) {
@@ -85,7 +128,24 @@ class _GitHubDeviceFlowSheetState extends State<GitHubDeviceFlowSheet> {
           _error = e.message;
         });
       }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _waiting = false;
+          _error = 'Sign-in was interrupted. Check your connection and try again.';
+          _technical = e.toString();
+        });
+      }
+    } finally {
+      _polling = false;
     }
+  }
+
+  @override
+  void dispose() {
+    // Stop the polling loop when the sheet is dismissed/destroyed.
+    _cancelled = true;
+    super.dispose();
   }
 
   /// Copies the one-time code to the clipboard.
@@ -95,18 +155,32 @@ class _GitHubDeviceFlowSheetState extends State<GitHubDeviceFlowSheet> {
     setState(() => _copied = true);
   }
 
-  /// Copies the code and opens the verification page in the browser.
+  /// Copies the code and opens the verification page in the browser. Never
+  /// throws: a failed launch (no browser, PlatformException on some OEMs)
+  /// only surfaces a soft message — the flow keeps polling and the user can
+  /// still open the page manually.
   Future<void> _openGitHub() async {
     if (_verificationUri == null) return;
     await Clipboard.setData(ClipboardData(text: _userCode ?? ''));
     if (!mounted) return;
     setState(() => _copied = true);
-    final opened = await launchUrl(
-      Uri.parse(_verificationUri!),
-      mode: LaunchMode.externalApplication,
-    );
-    if (!opened && mounted) {
-      setState(() => _error = 'Could not open the browser. Visit $_verificationUri and enter the code.');
+    try {
+      final opened = await launchUrl(
+        Uri.parse(_verificationUri!),
+        mode: LaunchMode.externalApplication,
+      );
+      if (!opened && mounted) {
+        setState(() => _status =
+            'Open $_verificationUri in your browser and enter the code.');
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _status = 'Could not open the browser automatically. Open '
+              '$_verificationUri and enter the code.';
+          _technical = e.toString();
+        });
+      }
     }
   }
 
@@ -143,7 +217,7 @@ class _GitHubDeviceFlowSheetState extends State<GitHubDeviceFlowSheet> {
             const SizedBox(height: 6),
             Text(
               _done
-                  ? 'Loading your repositories…'
+                  ? 'Connected as $_loginCache'
                   : _waiting
                       ? 'Waiting for authorization…'
                       : 'On the GitHub page, enter this one-time code:',
@@ -201,14 +275,18 @@ class _GitHubDeviceFlowSheetState extends State<GitHubDeviceFlowSheet> {
               ]),
               if (_waiting) ...[
                 const SizedBox(height: 14),
-                const Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                  SizedBox(
+                Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                  const SizedBox(
                       width: 14,
                       height: 14,
                       child: CircularProgressIndicator(strokeWidth: 2)),
-                  SizedBox(width: 10),
-                  Text('Waiting for you to finish on github.com…',
-                      style: TextStyle(color: AppTheme.muted, fontSize: 12)),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      _status ?? 'Waiting for you to finish on github.com…',
+                      style: const TextStyle(color: AppTheme.muted, fontSize: 12),
+                    ),
+                  ),
                 ]),
               ],
             ],
@@ -217,6 +295,13 @@ class _GitHubDeviceFlowSheetState extends State<GitHubDeviceFlowSheet> {
               Text(_error!,
                   textAlign: TextAlign.center,
                   style: const TextStyle(color: AppTheme.err, fontSize: 13)),
+              if (_technical != null) ...[
+                const SizedBox(height: 6),
+                Text('Detail: $_technical',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                        color: AppTheme.muted.withOpacity(.8), fontSize: 11)),
+              ],
               const SizedBox(height: 12),
               OutlinedButton.icon(
                 onPressed: _start,

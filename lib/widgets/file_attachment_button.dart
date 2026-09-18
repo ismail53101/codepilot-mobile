@@ -9,10 +9,14 @@ class FileAttachmentButton extends StatelessWidget {
   final ValueChanged<PlatformFile> onFilePicked;
   final ValueChanged<String>? onError;
 
+  /// Compact inline variant for the composer's quiet actions row.
+  final bool compact;
+
   const FileAttachmentButton({
     super.key,
     required this.onFilePicked,
     this.onError,
+    this.compact = false,
   });
 
   /// Code/project file extensions commonly attached to prompts.
@@ -40,6 +44,13 @@ class FileAttachmentButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (compact) {
+      return _QuietAction(
+        icon: Icons.attach_file,
+        label: 'File',
+        onTap: _pick,
+      );
+    }
     return _ActionChipButton(
       icon: Icons.attach_file,
       label: 'File',
@@ -48,18 +59,64 @@ class FileAttachmentButton extends StatelessWidget {
   }
 }
 
-/// "Integrate" button on the Home command bar: opens the Integrations screen.
+/// "Integrate" entry point on the Home composer: opens the Integrations
+/// screen. Visually quiet so it never competes with the Ask/Search action.
 class IntegrateButton extends StatelessWidget {
   final VoidCallback onTap;
+  final bool compact;
 
-  const IntegrateButton({super.key, required this.onTap});
+  const IntegrateButton({super.key, required this.onTap, this.compact = false});
 
   @override
   Widget build(BuildContext context) {
+    if (compact) {
+      return _QuietAction(
+        icon: Icons.link,
+        label: 'Integrate',
+        onTap: onTap,
+      );
+    }
     return _ActionChipButton(
       icon: Icons.link,
       label: 'Integrate',
       onTap: onTap,
+    );
+  }
+}
+
+/// Quiet icon+label text control used inside the composer's actions row.
+class _QuietAction extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+
+  const _QuietAction({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      borderRadius: BorderRadius.circular(10),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(10),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            Icon(icon, color: AppTheme.muted, size: 18),
+            const SizedBox(width: 5),
+            Text(label,
+                style: const TextStyle(
+                    color: AppTheme.muted,
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w500)),
+          ]),
+        ),
+      ),
     );
   }
 }
