@@ -73,7 +73,7 @@ class OverflowMenu extends StatelessWidget {
   static double menuHeight(List<OverflowMenuItem> items) {
     var h = 8.0; // vertical padding
     for (var i = 0; i < items.length; i++) {
-      h += 64; // item height
+      h += 78; // item height (title + subtitle + padding at default scale)
       if (items[i].dividerBefore && i > 0) h += 9; // divider + margins
     }
     return h.toDouble();
@@ -107,17 +107,21 @@ class OverflowMenu extends StatelessWidget {
       ),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(20),
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
-          for (var i = 0; i < items.length; i++) ...[
-            if (items[i].dividerBefore && i > 0)
-              Container(
-                height: 1,
-                margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                color: AppTheme.border,
-              ),
-            _MenuRow(item: items[i], onTap: () => onSelected(items[i].id)),
-          ],
-        ]),
+        // Scrollable so oversized content (large font scale) can never
+        // overflow the constrained panel.
+        child: SingleChildScrollView(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            for (var i = 0; i < items.length; i++) ...[
+              if (items[i].dividerBefore && i > 0)
+                Container(
+                  height: 1,
+                  margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                  color: AppTheme.border,
+                ),
+              _MenuRow(item: items[i], onTap: () => onSelected(items[i].id)),
+            ],
+          ]),
+        ),
       ),
     );
   }
