@@ -19,6 +19,7 @@ dependencies:
   cross_file: ^0.3.4+2       # shared file type for share_plus
   path: ^1.9.0
   url_launcher: ^6.3.0     # GitHub OAuth device verification page
+  webview_flutter: ^4.7.0   # live HTML preview of generated code
 
 dev_dependencies:
   flutter_test:

@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import '../main.dart';
 import '../project_service.dart';
 import '../theme.dart';
+import 'preview_screen.dart';
 
 /// File Preview screen: read-only file content with optional line highlight.
 class FilePreviewScreen extends StatefulWidget {
@@ -80,6 +81,12 @@ class _FilePreviewScreenState extends State<FilePreviewScreen> {
                     'attachmentContent': _content!,
                   }),
         ),
+        if (PreviewScreen.isPreviewable(_path))
+          IconButton(
+            icon: const Icon(Icons.play_arrow),
+            tooltip: 'Live preview',
+            onPressed: _content == null ? null : () => openHtmlPreview(context, rawHtml: _content),
+          ),
       ]),
       body: _error != null
           ? Center(child: Text(_error!, style: const TextStyle(color: AppTheme.err)))

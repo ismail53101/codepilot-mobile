@@ -130,11 +130,14 @@ class _HomeScreenState extends State<HomeScreen> {
         'query': text,
         'attachmentName': attachmentName,
         'attachmentContent': content,
+        'fresh': true,
       };
     } else if (attachmentName != null) {
-      chatArgs = '$attachmentName\n$text';
+      chatArgs = {'query': '$attachmentName\n$text', 'fresh': true};
     } else {
-      chatArgs = text;
+      // Fresh: Home always starts a NEW conversation (previous thread is
+      // kept in Chats), matching other chatbots' behavior.
+      chatArgs = {'query': text, 'fresh': true};
     }
     Navigator.pushNamed(context, '/chat', arguments: chatArgs);
     _command.clear();

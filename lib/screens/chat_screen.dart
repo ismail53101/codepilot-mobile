@@ -13,6 +13,7 @@ import '../pdf_text.dart';
 import '../project_service.dart';
 import '../stores.dart';
 import '../theme.dart';
+import 'preview_screen.dart';
 
 /// AI Coding Chat screen: command bar + streaming chat + confirm/diff flow.
 ///
@@ -171,7 +172,18 @@ class _ChatScreenState extends State<ChatScreen> {
     }
 
     // Resume the most recent conversation silently (memory across restarts).
-    if (!_restored) {
+    final bool fresh = arg is Map && arg['fresh'] == true;
+    if (fresh) {
+      // Entering from Home: ALWAYS a brand-new conversation, like other
+      // chatbots. A previously resumed thread is not lost — it stays in
+      // the Chats history.
+      setState(() {
+        _restored = true;
+        _sessionId = null;
+        _messages.clear();
+        _pending.clear();
+      });
+    } else if (!_restored) {
       final sessions = await chatSessionStore.load();
       if (!mounted) return;
       setState(() {
@@ -818,6 +830,13 @@ class _CodeBlock extends StatelessWidget {
           const SizedBox(width: 10),
           Text(lang ?? 'code', style: const TextStyle(color: AppTheme.muted, fontSize: 11)),
           const Spacer(),
+          if (lang != null && const ['html', 'htm'].contains(lang!.toLowerCase()))
+            IconButton(
+              visualDensity: VisualDensity.compact,
+              tooltip: 'Live preview',
+              icon: const Icon(Icons.play_arrow, size: 17, color: AppTheme.ok),
+              onPressed: () => openHtmlPreview(context, rawHtml: code),
+            ),
           IconButton(
             visualDensity: VisualDensity.compact,
             tooltip: 'Copy code',

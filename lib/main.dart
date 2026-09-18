@@ -16,6 +16,7 @@ import 'screens/home_screen.dart';
 import 'screens/github_screen.dart';
 import 'screens/import_screen.dart';
 import 'screens/integrations_screen.dart';
+import 'screens/preview_screen.dart';
 import 'screens/projects_screen.dart';
 import 'screens/search_history_screen.dart';
 import 'screens/search_results_screen.dart';
@@ -58,6 +59,7 @@ class CodePilotApp extends StatelessWidget {
         '/chat': (_) => const ChatScreen(),
         '/search': (_) => const SearchResultsScreen(),
         '/preview': (_) => const FilePreviewScreen(),
+        '/live-preview': (_) => const LivePreviewRoute(),
         '/diff': (_) => const ChangeDiffScreen(),
         '/build': (_) => const BuildLogsScreen(),
         '/export': (_) => const ExportScreen(),
