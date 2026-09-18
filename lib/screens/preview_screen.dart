@@ -78,7 +78,7 @@ class _PreviewScreenState extends State<PreviewScreen> {
   }
 
   String _document(String html) {
-    final hasViewport = RegExp(r'name\s*=\s*["\']viewport', caseSensitive: false).hasMatch(html);
+    final hasViewport = RegExp(r"name\s*=\s*[\"']viewport", caseSensitive: false).hasMatch(html);
     final injection = hasViewport
         ? ''
         : '<meta name="viewport" content="width=device-width, initial-scale=1.0">';
