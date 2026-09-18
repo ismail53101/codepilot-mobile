@@ -661,7 +661,7 @@ class _MarkdownText extends StatelessWidget {
   static final _numberedRe = RegExp(r'^\s*(\d+)[.)]\s+(.*)$');
   static final _inlineRe = RegExp(r'(\*\*([^*]+)\*\*)|(\*([^*]+)\*)|(`([^`]+)`)');
 
-  InlineSpan _inline(String line) {
+  TextSpan _inline(String line) {
     final spans = <InlineSpan>[];
     var cursor = 0;
     for (final m in _inlineRe.allMatches(line)) {
