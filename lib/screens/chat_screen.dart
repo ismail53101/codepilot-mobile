@@ -300,7 +300,6 @@ class _ChatScreenState extends State<ChatScreen> {
     final text = _input.text.trim();
     if (text.isEmpty || _busy) return;
     final image = _pendingImage;
-    final imageName = _pendingImageName;
     setState(() {
       _messages.add(ChatMessage(
         role: 'user',
