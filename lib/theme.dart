@@ -13,6 +13,12 @@ class AppTheme {
   static const warn = Color(0xFFD29922);
   static const err = Color(0xFFF85149);
 
+  // Home screen visual identity (very dark navy + electric blue accents).
+  static const navyBg = Color(0xFF05080F); // page background, near-black navy
+  static const navyPanel = Color(0xFF0C1220); // menu / popup panel base
+  static const glowAccent = Color(0xFF3B82F6); // neon-blue outline + glow
+  static const glowSoft = Color(0x333B82F6); // soft outer glow (blue @ 20%)
+
   static ThemeData dark() {
     final base = ThemeData.dark(useMaterial3: true);
     return base.copyWith(

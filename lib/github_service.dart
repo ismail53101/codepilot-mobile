@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
 import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
@@ -10,6 +11,120 @@ import 'project_service.dart';
 import 'stores.dart';
 
 const githubOAuthClientId = 'Ov23liNr0y5Ux3jdEoYq';
+
+/// Resend email service used for the email-OTP sign-in option. The key is
+/// read from the environment; without it the email option reports itself as
+/// unavailable instead of failing at runtime.
+class EmailOtpService {
+  static const _endpoint = 'https://api.resend.com/emails';
+  static const _codeLength = 6;
+  static const _codeValidity = Duration(minutes: 10);
+
+  final Map<String, ({String code, DateTime expires})> _pending = {};
+
+  String? _apiKey() {
+    final key = const String.fromEnvironment(
+      'RESEND_API_KEY',
+      defaultValue: '',
+    );
+    if (key.isNotEmpty) return key;
+    final envKey = Platform.environment['RESEND_API_KEY'];
+    return (envKey == null || envKey.isEmpty) ? null : envKey;
+  }
+
+  /// Whether the email-OTP option can be offered. UI hides it when false.
+  bool get isAvailable => _apiKey() != null;
+
+  String _generateCode() {
+    final rnd = Random.secure();
+    return List.generate(_codeLength, (_) => rnd.nextInt(10)).join();
+  }
+
+  /// Sends a fresh 6-digit OTP to [email]. Returns the code only on test
+  /// environments ("test:") so widget tests never touch the network.
+  Future<({bool ok, String? error})> sendCode(String email, {bool testMode = false}) async {
+    final trimmed = email.trim();
+    if (trimmed.isEmpty || !trimmed.contains('@')) {
+      return (ok: false, error: 'Enter a valid email address.');
+    }
+    final code = _generateCode();
+    if (testMode) {
+      _pending[trimmed] = (code: code, expires: DateTime.now().add(_codeValidity));
+      return (ok: true, error: null);
+    }
+    final key = _apiKey();
+    if (key == null) {
+      return (ok: false, error: 'Email sign-in is not configured on this build.');
+    }
+    try {
+      final response = await http.post(
+        Uri.parse(_endpoint),
+        headers: {
+          'Authorization': 'Bearer $key',
+          'Content-Type': 'application/json',
+        },
+        body: jsonEncode({
+          'from': 'CodePilot <onboarding@resend.dev>',
+          'to': [trimmed],
+          'subject': 'Your CodePilot sign-in code',
+          'html': _otpEmailHtml(code),
+        }),
+      );
+      if (response.statusCode == 200) {
+        _pending[trimmed] = (code: code, expires: DateTime.now().add(_codeValidity));
+        return (ok: true, error: null);
+      } else {
+        return (ok: false, error: _resendError(response));
+      }
+    } on SocketException {
+      return (ok: false, error: 'No network connection. Try again.');
+    }
+  }
+
+  /// Verifies [code] for [email]. On success the code is consumed.
+  Future<({bool ok, String? error})> verifyCode(String email, String code) async {
+    final trimmed = email.trim();
+    final entry = _pending[trimmed];
+    if (entry == null) {
+      return (ok: false, error: 'Request a new code first.');
+    }
+    if (DateTime.now().isAfter(entry.expires)) {
+      _pending.remove(trimmed);
+      return (ok: false, error: 'That code expired. Request a new one.');
+    }
+    if (entry.code != code.trim()) {
+      return (ok: false, error: 'Incorrect code. Check the email and try again.');
+    }
+    _pending.remove(trimmed);
+    return (ok: true, error: null);
+  }
+
+  String _otpEmailHtml(String code) {
+    return '''
+<!DOCTYPE html>
+<html>
+  <body style="margin:0;padding:24px;background:#0d1117;font-family:sans-serif;">
+    <div style="max-width:420px;margin:0 auto;background:#161b22;border:1px solid #30363d;border-radius:12px;padding:28px;text-align:center;">
+      <h2 style="color:#e6edf3;margin:0 0 8px;">CodePilot sign-in</h2>
+      <p style="color:#8b949e;font-size:13px;margin:0 0 20px;">Use this code to finish signing in:</p>
+      <div style="font-size:32px;font-weight:700;letter-spacing:8px;color:#3b82f6;">$code</div>
+      <p style="color:#8b949e;font-size:12px;margin:20px 0 0;">This code expires in 10 minutes. If you didn't request it, you can ignore this email.</p>
+    </div>
+  </body>
+  </html>
+''';
+  }
+
+  String _resendError(http.Response response) {
+    try {
+      final json = jsonDecode(response.body) as Map;
+      return json['message'] as String? ??
+          'Could not send the email (HTTP ${response.statusCode}).';
+    } catch (_) {
+      return 'Could not send the email (HTTP ${response.statusCode}).';
+    }
+  }
+}
 
 class GitHubException implements Exception {
   final String message;

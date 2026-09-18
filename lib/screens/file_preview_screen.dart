@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../main.dart';
 import '../project_service.dart';
@@ -55,8 +56,30 @@ class _FilePreviewScreenState extends State<FilePreviewScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: Text(_path.split('/').last, style: const TextStyle(fontSize: 16)), actions: [
-        IconButton(icon: const Icon(Icons.chat), tooltip: 'Ask AI about this file',
-          onPressed: () => Navigator.pushNamed(context, '/chat', arguments: 'Explain the file $_path')),
+        IconButton(
+          icon: const Icon(Icons.copy),
+          tooltip: 'Copy file content',
+          onPressed: _content == null
+              ? null
+              : () async {
+                  await Clipboard.setData(ClipboardData(text: _content!));
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                        content: Text('File content copied'), duration: Duration(seconds: 1)));
+                  }
+                },
+        ),
+        IconButton(
+          icon: const Icon(Icons.chat),
+          tooltip: 'Ask AI about this file',
+          onPressed: _content == null
+              ? null
+              : () => Navigator.pushNamed(context, '/chat', arguments: {
+                    'query': 'Explain the file $_path',
+                    'attachmentName': _path,
+                    'attachmentContent': _content!,
+                  }),
+        ),
       ]),
       body: _error != null
           ? Center(child: Text(_error!, style: const TextStyle(color: AppTheme.err)))

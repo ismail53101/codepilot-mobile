@@ -79,6 +79,14 @@ class ChatMessage {
   final bool isError;
 
   const ChatMessage({required this.role, required this.content, this.isError = false});
+
+  Map<String, dynamic> toJson() => {'role': role, 'content': content, if (isError) 'isError': true};
+
+  factory ChatMessage.fromJson(Map<String, dynamic> j) => ChatMessage(
+        role: (j['role'] as String?) ?? 'user',
+        content: (j['content'] as String?) ?? '',
+        isError: (j['isError'] as bool?) ?? false,
+      );
 }
 
 /// A recorded change (applied or undone) for the change history.

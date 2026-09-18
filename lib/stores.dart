@@ -63,6 +63,23 @@ class SettingsStore {
   Future<void> writeGitHubToken(String token) => _secure.writeGitHubToken(token);
   Future<void> deleteGitHubToken() => _secure.deleteGitHubToken();
 
+  /// Email identity linked via the email-OTP sign-in (non-secret, it is the
+  /// user's own address).
+  Future<String?> readEmailIdentity() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString('codepilot_email_identity');
+  }
+
+  Future<void> saveEmailIdentity(String email) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('codepilot_email_identity', email.trim());
+  }
+
+  Future<void> clearEmailIdentity() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('codepilot_email_identity');
+  }
+
   Future<Map<String, String?>> loadGitHubProject() async {
     final prefs = await SharedPreferences.getInstance();
     return {
@@ -84,5 +101,186 @@ class SettingsStore {
     await prefs.remove('github_repo_owner');
     await prefs.remove('github_repo_name');
     await prefs.remove('github_repo_branch');
+  }
+}
+
+/// One recent-search entry shown on the Search History screen.
+class SearchHistoryEntry {
+  final String query;
+  final DateTime time;
+
+  const SearchHistoryEntry(this.query, this.time);
+
+  String get timeLabel {
+    final local = time.toLocal();
+    final mm = local.month.toString().padLeft(2, '0');
+    final dd = local.day.toString().padLeft(2, '0');
+    final hh = local.hour.toString().padLeft(2, '0');
+    final mi = local.minute.toString().padLeft(2, '0');
+    return '$mm/$dd · $hh:$mi';
+  }
+}
+
+/// Persistent recent-search history. Queries typed on the Home command bar
+/// are recorded here (deduplicated, newest first) and shown on the
+/// Search History screen. Non-secret data in SharedPreferences.
+class SearchHistoryStore {
+  static const _kHistory = 'search_history';
+  static const _kTs = 'search_history_ts';
+  static const maxEntries = 50;
+
+  Future<List<SearchHistoryEntry>> load() async {
+    final prefs = await SharedPreferences.getInstance();
+    final queries = prefs.getStringList(_kHistory) ?? const [];
+    final stamps = prefs.getStringList(_kTs) ?? const [];
+    final entries = <SearchHistoryEntry>[];
+    for (var i = 0; i < queries.length; i++) {
+      final raw = stamps.length > i ? stamps[i] : null;
+      final ms = raw == null ? null : int.tryParse(raw);
+      entries.add(SearchHistoryEntry(queries[i], ms == null ? DateTime.now() : DateTime.fromMillisecondsSinceEpoch(ms)));
+    }
+    return entries;
+  }
+
+  Future<void> add(String query) async {
+    final q = query.trim();
+    if (q.isEmpty) return;
+    final prefs = await SharedPreferences.getInstance();
+    final queries = prefs.getStringList(_kHistory) ?? <String>[];
+    final stamps = prefs.getStringList(_kTs) ?? <String>[];
+    final existing = queries.indexOf(q);
+    if (existing >= 0) {
+      queries.removeAt(existing);
+      if (existing < stamps.length) stamps.removeAt(existing);
+    }
+    queries.insert(0, q);
+    stamps.insert(0, DateTime.now().millisecondsSinceEpoch.toString());
+    if (queries.length > maxEntries) {
+      queries.removeRange(maxEntries, queries.length);
+      if (stamps.length > maxEntries) stamps.removeRange(maxEntries, stamps.length);
+    }
+    await prefs.setStringList(_kHistory, queries);
+    await prefs.setStringList(_kTs, stamps);
+  }
+
+  Future<void> removeAt(int index) async {
+    final prefs = await SharedPreferences.getInstance();
+    final queries = prefs.getStringList(_kHistory) ?? <String>[];
+    final stamps = prefs.getStringList(_kTs) ?? <String>[];
+    if (index < 0 || index >= queries.length) return;
+    queries.removeAt(index);
+    if (index < stamps.length) stamps.removeAt(index);
+    await prefs.setStringList(_kHistory, queries);
+    await prefs.setStringList(_kTs, stamps);
+  }
+
+  Future<void> clear() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_kHistory);
+    await prefs.remove(_kTs);
+  }
+}
+
+/// One saved AI chat session (conversation transcript + metadata).
+class ChatSession {
+  final String id;
+  final String title;
+  final DateTime time;
+  final List<ChatMessage> messages;
+
+  const ChatSession({
+    required this.id,
+    required this.title,
+    required this.time,
+    required this.messages,
+  });
+
+  ChatSession withMessages(List<ChatMessage> messages) => ChatSession(
+        id: id,
+        title: title,
+        time: DateTime.now(),
+        messages: messages,
+      );
+}
+
+/// Persistent AI chat sessions. Each conversation survives app restarts and
+/// can be resumed from the Chats entry point in chat; nothing secret is
+/// stored (messages contain project code the user chose to discuss).
+class ChatSessionStore {
+  static const _kSessions = 'chat_sessions';
+  static const maxSessions = 30;
+
+  Future<List<ChatSession>> load() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_kSessions);
+    if (raw == null) return const [];
+    try {
+      final list = jsonDecode(raw) as List;
+      return [
+        for (final item in list)
+          if (item is Map)
+            ChatSession(
+              id: (item['id'] as String?) ?? '',
+              title: (item['title'] as String?) ?? 'Chat',
+              time: DateTime.tryParse((item['time'] as String?) ?? '') ?? DateTime.now(),
+              messages: [
+                for (final m in (item['messages'] as List?) ?? const [])
+                  if (m is Map) ChatMessage.fromJson(Map<String, dynamic>.from(m)),
+              ],
+            ),
+      ]..removeWhere((s) => s.id.isEmpty || s.messages.isEmpty);
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  /// Adds or updates a session (newest first, capped). Returns nothing;
+  /// callers re-read via [load] when they need the list.
+  Future<void> save({required String? existingId, required String title, required List<ChatMessage> messages}) async {
+    if (messages.isEmpty) return;
+    final id = existingId ?? DateTime.now().microsecondsSinceEpoch.toString();
+    final sessions = await load();
+    sessions.removeWhere((s) => s.id == id);
+    sessions.insert(
+      0,
+      ChatSession(
+        id: id,
+        title: title.isEmpty ? 'Chat' : title,
+        time: DateTime.now(),
+        messages: messages,
+      ),
+    );
+    if (sessions.length > maxSessions) sessions.removeRange(maxSessions, sessions.length);
+    final encoded = jsonEncode([
+      for (final s in sessions)
+        {
+          'id': s.id,
+          'title': s.title,
+          'time': s.time.toIso8601String(),
+          'messages': [for (final m in s.messages) m.toJson()],
+        },
+    ]);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_kSessions, encoded);
+  }
+
+  Future<void> remove(String id) async {
+    final sessions = await load();
+    sessions.removeWhere((s) => s.id == id);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_kSessions, jsonEncode([
+      for (final s in sessions)
+        {
+          'id': s.id,
+          'title': s.title,
+          'time': s.time.toIso8601String(),
+          'messages': [for (final m in s.messages) m.toJson()],
+        },
+    ]));
+  }
+
+  Future<void> clearAll() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_kSessions);
   }
 }

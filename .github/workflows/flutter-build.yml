@@ -40,7 +40,15 @@ jobs:
       - run: flutter pub get
       - run: flutter analyze
       - run: flutter test
-      - run: flutter build apk --debug
+      - name: Build APK (bake RESEND_API_KEY into the app if the secret is set)
+        run: |
+          ARGS=""
+          if [ -n "$RESEND_API_KEY" ]; then
+            ARGS="--dart-define=RESEND_API_KEY=$RESEND_API_KEY"
+          fi
+          flutter build apk --debug $ARGS
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
       - uses: actions/upload-artifact@v4
         with:
           name: app-debug-apk

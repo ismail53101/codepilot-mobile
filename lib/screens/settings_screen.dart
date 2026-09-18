@@ -1,11 +1,38 @@
 import 'package:flutter/material.dart';
 
 import '../main.dart';
+import '../project_service.dart';
 import '../theme.dart';
 
-/// Settings screen: storage info, change history management, about.
-class SettingsScreen extends StatelessWidget {
+/// Settings screen: API provider status, storage info, change history.
+class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
+
+  @override
+  State<SettingsScreen> createState() => _SettingsScreenState();
+}
+
+class _SettingsScreenState extends State<SettingsScreen> {
+  String _provider = 'xKiro';
+  String _model = '';
+  String? _keyHint;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadStatus();
+  }
+
+  Future<void> _loadStatus() async {
+    final s = await settingsStore.load();
+    final key = await settingsStore.readApiKey();
+    if (!mounted) return;
+    setState(() {
+      _provider = s.providerName;
+      _model = s.modelId;
+      _keyHint = key == null || key.isEmpty ? null : maskKey(key);
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -14,11 +41,16 @@ class SettingsScreen extends StatelessWidget {
       appBar: AppBar(title: const Text('Settings')),
       body: ListView(padding: const EdgeInsets.all(16), children: [
         Card(child: ListTile(
-          leading: const Icon(Icons.key, color: AppTheme.accent),
+          leading: Icon(Icons.key, color: _keyHint == null ? AppTheme.muted : AppTheme.ok),
           title: const Text('Custom API Provider'),
-          subtitle: const Text('Base URL, API key, model, timeout, streaming'),
+          subtitle: Text(_keyHint == null
+              ? 'Add your API key (none stored)'
+              : '$_provider · $_model · key $_keyHint'),
           trailing: const Icon(Icons.chevron_right),
-          onTap: () => Navigator.pushNamed(context, '/api'),
+          onTap: () async {
+            await Navigator.pushNamed(context, '/api');
+            _loadStatus();
+          },
         )),
         Card(child: ListTile(
           leading: const Icon(Icons.upload_file, color: AppTheme.accent),

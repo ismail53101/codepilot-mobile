@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../agent_service.dart';
 import '../api_client.dart';
@@ -6,9 +7,14 @@ import '../github_service.dart';
 import '../main.dart';
 import '../models.dart';
 import '../project_service.dart';
+import '../stores.dart';
 import '../theme.dart';
 
 /// AI Coding Chat screen: command bar + streaming chat + confirm/diff flow.
+///
+/// Conversations persist across app restarts ([ChatSessionStore]) and can be
+/// resumed from the Chats sheet. Assistant replies render fenced code blocks
+/// as copyable monospace cards.
 class ChatScreen extends StatefulWidget {
   const ChatScreen({super.key});
 
@@ -22,7 +28,182 @@ class _ChatScreenState extends State<ChatScreen> {
   final List<ChatMessage> _messages = [];
   List<ProposedChange> _pending = [];
   bool _busy = false;
+  bool _restored = false;
   String? _streamBuf;
+  String? _sessionId;
+  // Content of a file attached on Home (route argument), injected once.
+  String? _pendingAttachment;
+  String? _pendingAttachmentName;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _initFromRoute());
+  }
+
+  Future<void> _initFromRoute() async {
+    if (!mounted) return;
+    final arg = ModalRoute.of(context)?.settings.arguments;
+    if (arg is String && arg.isNotEmpty && _input.text.isEmpty) {
+      setState(() => _input.text = arg);
+    } else if (arg is Map) {
+      final query = arg['query'];
+      if (query is String && query.isNotEmpty && _input.text.isEmpty) {
+        setState(() => _input.text = query);
+      }
+      if (arg['attachmentName'] is String && arg['attachmentContent'] is String) {
+        setState(() {
+          _pendingAttachmentName = arg['attachmentName'] as String;
+          _pendingAttachment = arg['attachmentContent'] as String;
+        });
+      }
+    }
+    // Resume the most recent conversation silently (memory across restarts).
+    if (!_restored) {
+      final sessions = await chatSessionStore.load();
+      if (!mounted) return;
+      setState(() {
+        _restored = true;
+        if (sessions.isNotEmpty) {
+          _sessionId = sessions.first.id;
+          _messages.addAll(sessions.first.messages);
+        }
+      });
+      _scrollDown();
+    }
+  }
+
+  String get _sessionTitle {
+    for (final m in _messages) {
+      if (m.role == 'user') {
+        final t = m.content.trim().replaceAll('\n', ' ');
+        return t.length > 60 ? '${t.substring(0, 60)}…' : t;
+      }
+    }
+    return 'Chat';
+  }
+
+  Future<void> _saveSession() async {
+    if (_messages.isEmpty) return;
+    await chatSessionStore.save(
+      existingId: _sessionId,
+      title: _sessionTitle,
+      messages: List.of(_messages),
+    );
+  }
+
+  Future<void> _openChatHistory() async {
+    final sessions = await chatSessionStore.load();
+    if (!mounted) return;
+    Object? sheetResult;
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (sheetContext) => Container(
+        constraints: BoxConstraints(maxHeight: MediaQuery.of(sheetContext).size.height * 0.7),
+        decoration: const BoxDecoration(
+          color: AppTheme.navyPanel,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+          border: Border(top: BorderSide(color: AppTheme.border)),
+        ),
+        child: SafeArea(
+          top: false,
+          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+            Container(
+              width: 40,
+              height: 4,
+              margin: const EdgeInsets.only(top: 14, bottom: 12),
+              decoration: BoxDecoration(color: AppTheme.border, borderRadius: BorderRadius.circular(2)),
+            ),
+            Row(children: [
+              const SizedBox(width: 20),
+              const Expanded(
+                child: Text('Chats', style: TextStyle(color: AppTheme.text, fontSize: 17, fontWeight: FontWeight.w700)),
+              ),
+              IconButton(
+                tooltip: 'Delete all chats',
+                icon: const Icon(Icons.delete_sweep_outlined, color: AppTheme.muted),
+                onPressed: sessions.isEmpty
+                    ? null
+                    : () async {
+                        await chatSessionStore.clearAll();
+                        if (sheetContext.mounted) Navigator.pop(sheetContext);
+                      },
+              ),
+            ]),
+            const SizedBox(height: 4),
+            Flexible(
+              child: sessions.isEmpty
+                  ? const Padding(
+                      padding: EdgeInsets.all(24),
+                      child: Text('No saved chats yet.', textAlign: TextAlign.center, style: TextStyle(color: AppTheme.muted)),
+                    )
+                  : ListView.builder(
+                      shrinkWrap: true,
+                      itemCount: sessions.length,
+                      itemBuilder: (context, i) {
+                        final s = sessions[i];
+                        final isCurrent = s.id == _sessionId;
+                        return ListTile(
+                          leading: Icon(
+                            isCurrent ? Icons.chat_bubble : Icons.chat_bubble_outline,
+                            color: isCurrent ? AppTheme.glowAccent : AppTheme.muted,
+                          ),
+                          title: Text(s.title,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(color: AppTheme.text, fontSize: 14)),
+                          subtitle: Text(
+                            '${s.messages.length} messages · ${s.time.toLocal().month}/${s.time.toLocal().day}',
+                            style: const TextStyle(color: AppTheme.muted, fontSize: 12),
+                          ),
+                          trailing: IconButton(
+                            icon: const Icon(Icons.delete_outline, size: 20, color: AppTheme.muted),
+                            onPressed: () async {
+                              await chatSessionStore.remove(s.id);
+                              if (!sheetContext.mounted) return;
+                              Navigator.pop(sheetContext);
+                            },
+                          ),
+                          onTap: () {
+                            sheetResult = s;
+                            Navigator.pop(sheetContext);
+                          },
+                        );
+                      },
+                    ),
+            ),
+            const SizedBox(height: 8),
+          ]),
+        ),
+      ),
+    );
+    if (!mounted) return;
+    final chosen = sheetResult;
+    if (chosen is ChatSession) {
+      setState(() {
+        _sessionId = chosen.id;
+        _messages
+          ..clear()
+          ..addAll(chosen.messages);
+        _pending.clear();
+      });
+      await _saveSession();
+      _scrollDown();
+    }
+  }
+
+  Future<void> _newChat() async {
+    if (_messages.isNotEmpty) await _saveSession();
+    if (!mounted) return;
+    setState(() {
+      _messages.clear();
+      _pending.clear();
+      _sessionId = null;
+    });
+    _push('system', 'New chat. The previous conversation is saved under Chats.');
+  }
 
   Future<void> _send() async {
     final text = _input.text.trim();
@@ -33,10 +214,25 @@ class _ChatScreenState extends State<ChatScreen> {
     });
     _input.clear();
 
+    // Inject attached file content (from the Home File button) once.
+    var effectiveRequest = text;
+    final attachmentContent = _pendingAttachment;
+    final attachmentName = _pendingAttachmentName;
+    if (attachmentContent != null) {
+      final clipped = attachmentContent.length > 12000
+          ? '${attachmentContent.substring(0, 12000)}\n… (truncated)'
+          : attachmentContent;
+      effectiveRequest = 'Attached file "$attachmentName":\n```\n$clipped\n```\n\n$text';
+      setState(() {
+        _pendingAttachment = null;
+        _pendingAttachmentName = null;
+      });
+    }
+
     try {
       final context = projectService.projectName == null
-          ? agentService.buildGeneralContext(request: text)
-          : agentService.buildContext(request: text);
+          ? agentService.buildGeneralContext(request: effectiveRequest)
+          : agentService.buildContext(request: effectiveRequest);
       final history = _messages.length > 10
           ? _messages.sublist(_messages.length - 10)
           : _messages;
@@ -66,6 +262,7 @@ class _ChatScreenState extends State<ChatScreen> {
         _pending = parsed.changes;
       });
       _scrollDown();
+      await _saveSession();
     } on ApiException catch (e) {
       _push('system', e.message, isError: true);
     } on ProjectException catch (e) {
@@ -73,7 +270,7 @@ class _ChatScreenState extends State<ChatScreen> {
     } catch (e) {
       _push('system', 'Unexpected error: $e', isError: true);
     } finally {
-      setState(() => _busy = false);
+      if (mounted) setState(() => _busy = false);
       _scrollDown();
     }
   }
@@ -102,7 +299,7 @@ class _ChatScreenState extends State<ChatScreen> {
           kind: change.kind, path: change.path, before: before, after: change.after, diff: diff, isNew: change.isNew);
       agentService.applyChange(full);
       setState(() => _pending.removeAt(index));
-      _push('system', 'Applied ${change.kind} to ${change.path}. Undo is available on the Home screen.');
+      _push('system', 'Applied ${change.kind} to ${change.path}. Undo it with the ↺ button above.');
     } else {
       _push('system', 'Change to ${change.path} rejected — nothing was modified.');
     }
@@ -111,7 +308,7 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _publishToGitHub() async {
     final repo = await githubProjectStore.load();
     if (repo == null) {
-      _push('system', 'Connect and import a GitHub repository first from Home → GitHub.', isError: true);
+      _push('system', 'Connect and import a GitHub repository first from Integrations → GitHub.', isError: true);
       return;
     }
     try {
@@ -126,14 +323,37 @@ class _ChatScreenState extends State<ChatScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: Text('Chat · ${projectService.projectName ?? 'general'}'), actions: [
+        IconButton(icon: const Icon(Icons.chat_bubble_outline), tooltip: 'Chats (history)', onPressed: _openChatHistory),
+        IconButton(icon: const Icon(Icons.add_comment_outlined), tooltip: 'New chat', onPressed: _busy ? null : _newChat),
         IconButton(icon: const Icon(Icons.cloud_upload), tooltip: 'Publish confirmed changes to GitHub', onPressed: _publishToGitHub),
         IconButton(icon: const Icon(Icons.undo), tooltip: 'Undo latest change', onPressed: () {
           final rec = agentService.undoLast();
           _push('system', rec == null ? 'Nothing to undo.' : 'Undone: ${rec.kind} ${rec.path}');
         }),
-        IconButton(icon: const Icon(Icons.cleaning_services), tooltip: 'Clear chat', onPressed: () => setState(() { _messages.clear(); _pending.clear(); })),
+        IconButton(icon: const Icon(Icons.cleaning_services), tooltip: 'Clear this chat', onPressed: () => setState(() { _messages.clear(); _pending.clear(); _sessionId = null; })),
       ]),
       body: Column(children: [
+        if (_pendingAttachmentName != null)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+            child: Row(children: [
+              const Icon(Icons.attach_file, size: 16, color: AppTheme.glowAccent),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text('Attached: $_pendingAttachmentName',
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(color: AppTheme.muted, fontSize: 12)),
+              ),
+              IconButton(
+                visualDensity: VisualDensity.compact,
+                icon: const Icon(Icons.close, size: 16, color: AppTheme.muted),
+                onPressed: () => setState(() {
+                  _pendingAttachment = null;
+                  _pendingAttachmentName = null;
+                }),
+              ),
+            ]),
+          ),
         Expanded(
           child: ListView(
             controller: _scroll,
@@ -178,7 +398,9 @@ class _ChatScreenState extends State<ChatScreen> {
           border: Border.all(color: m.isError ? AppTheme.err : AppTheme.border),
           borderRadius: BorderRadius.circular(12),
         ),
-        child: SelectableText(m.content, style: TextStyle(color: m.isError ? AppTheme.err : AppTheme.text)),
+        child: isUser
+            ? SelectableText(m.content, style: TextStyle(color: m.isError ? AppTheme.err : AppTheme.text))
+            : _AssistantBody(content: m.content, isError: m.isError),
       ),
     );
   }
@@ -194,6 +416,96 @@ class _ChatScreenState extends State<ChatScreen> {
         subtitle: Text(c.isNew ? 'New file' : 'Existing file — review the diff before applying', style: TextStyle(color: AppTheme.muted)),
         trailing: FilledButton(child: const Text('Review diff'), onPressed: () => _openDiff(i)),
       ),
+    );
+  }
+}
+
+/// Assistant message body with markdown-lite rendering: fenced ``` blocks
+/// become monospace cards with a copy button; the rest renders as text.
+class _AssistantBody extends StatelessWidget {
+  final String content;
+  final bool isError;
+
+  const _AssistantBody({required this.content, required this.isError});
+
+  @override
+  Widget build(BuildContext context) {
+    final blocks = <({String? lang, String code, String before})>[];
+    final re = RegExp(r'```(\w*)\n([\s\S]*?)```');
+    var cursor = 0;
+    for (final m in re.allMatches(content)) {
+      blocks.add((
+        lang: m.group(1)!.isEmpty ? null : m.group(1),
+        code: (m.group(2) ?? '').replaceFirst(RegExp(r'\n$'), ''),
+        before: content.substring(cursor, m.start),
+      ));
+      cursor = m.end;
+    }
+    final rest = content.substring(cursor);
+
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      if (blocks.isEmpty)
+        SelectableText(content, style: TextStyle(color: isError ? AppTheme.err : AppTheme.text))
+      else ...[
+        for (final b in blocks) ...[
+          if (b.before.trim().isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: SelectableText(b.before.trim(), style: TextStyle(color: isError ? AppTheme.err : AppTheme.text)),
+            ),
+          _CodeBlock(lang: b.lang, code: b.code),
+        ],
+        if (rest.trim().isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: SelectableText(rest.trim(), style: TextStyle(color: isError ? AppTheme.err : AppTheme.text)),
+          ),
+      ],
+    ]);
+  }
+}
+
+/// Copyable monospace code card inside an assistant reply.
+class _CodeBlock extends StatelessWidget {
+  final String? lang;
+  final String code;
+
+  const _CodeBlock({required this.lang, required this.code});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: 6),
+      decoration: BoxDecoration(
+        color: AppTheme.bg,
+        border: Border.all(color: AppTheme.border),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          const SizedBox(width: 10),
+          Text(lang ?? 'code', style: const TextStyle(color: AppTheme.muted, fontSize: 11)),
+          const Spacer(),
+          IconButton(
+            visualDensity: VisualDensity.compact,
+            tooltip: 'Copy code',
+            icon: const Icon(Icons.copy, size: 15, color: AppTheme.muted),
+            onPressed: () async {
+              await Clipboard.setData(ClipboardData(text: code));
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Code copied'), duration: Duration(seconds: 1)));
+              }
+            },
+          ),
+        ]),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(10, 0, 10, 10),
+          child: SelectableText(code,
+              style: const TextStyle(fontFamily: 'monospace', fontSize: 12, height: 1.5, color: AppTheme.text)),
+        ),
+      ]),
     );
   }
 }
