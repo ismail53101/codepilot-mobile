@@ -242,6 +242,14 @@ class _GitHubScreenState extends State<GitHubScreen> {
           IconButton(onPressed: _busy ? null : _disconnect, icon: const Icon(Icons.link_off)),
         ]),
         body: ListView(padding: const EdgeInsets.all(16), children: [
+          if (_emailIdentity != null) Card(
+            color: AppTheme.surface2,
+            child: ListTile(
+              leading: const Icon(Icons.alternate_email, color: AppTheme.ok),
+              title: Text(_emailIdentity!),
+              subtitle: const Text('Email verified'),
+            ),
+          ),
           // ---- Connection state card: Disconnected / Connecting / Connected
           Card(
             color: AppTheme.surface2,
