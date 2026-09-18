@@ -1,3 +1,6 @@
+import 'dart:convert';
+
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -34,6 +37,81 @@ class _ChatScreenState extends State<ChatScreen> {
   // Content of a file attached on Home (route argument), injected once.
   String? _pendingAttachment;
   String? _pendingAttachmentName;
+  // Image attached in-chat (base64 data URL) — sent via vision format.
+  String? _pendingImage;
+  String? _pendingImageName;
+
+  static const _imageExtensions = ['png', 'jpg', 'jpeg', 'webp', 'gif'];
+
+  /// Pick an image/code file mid-chat. Images go to the model as vision
+  /// input; text files are inlined; ZIPs import as a project.
+  Future<void> _pickAttachment() async {
+    try {
+      final result = await FilePicker.platform.pickFiles(withData: true);
+      final file = result?.files.single;
+      if (file == null) return;
+      final ext = file.extension?.toLowerCase() ?? '';
+
+      if (ext == 'zip') {
+        if (file.path == null) return;
+        try {
+          final message = await projectService.importZip(file.path!);
+          if (!mounted) return;
+          ScaffoldMessenger.of(context)
+              .showSnackBar(SnackBar(content: Text(message)));
+        } catch (e) {
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('Could not import ZIP: $e')));
+        }
+        return;
+      }
+
+      if (_imageExtensions.contains(ext)) {
+        final bytes = file.bytes;
+        if (bytes == null || bytes.lengthInBytes > 5 * 1024 * 1024) {
+          _push('system', 'Image is missing or larger than 5 MB.', isError: true);
+          return;
+        }
+        setState(() {
+          _pendingImage = 'data:image/$ext;base64,${base64Encode(bytes)}';
+          _pendingImageName = file.name;
+        });
+        return;
+      }
+
+      // Treat everything else as a text/code file (binary-safe read).
+      final bytes = file.bytes;
+      if (bytes == null) return;
+      for (final b in bytes.take(512)) {
+        if (b < 9 || (b > 13 && b < 32)) {
+          _push('system', 'Unsupported binary file type: .${file.extension}', isError: true);
+          return;
+        }
+      }
+      final content = utf8.decode(bytes, allowMalformed: true);
+      setState(() {
+        _pendingAttachment = content.length > 12000
+            ? content.substring(0, 12000)
+            : content;
+        _pendingAttachmentName = file.name;
+      });
+    } catch (e) {
+      _push('system', 'File picker unavailable: $e', isError: true);
+    }
+  }
+
+  void _clearAttachments() {
+    setState(() {
+      _pendingAttachment = null;
+      _pendingAttachmentName = null;
+      _pendingImage = null;
+      _pendingImageName = null;
+    });
+  }
+
+  bool get _hasPendingAttachment =>
+      _pendingAttachment != null || _pendingImage != null;
 
   @override
   void initState() {
@@ -76,17 +154,9 @@ class _ChatScreenState extends State<ChatScreen> {
     }
 
     if (routeQuery != null) {
-      // Route queries start a NEW conversation rather than appending to the
-      // resumed one, so "Hi" from Home cannot land in an unrelated thread.
-      if (_sessionId != null) {
-        await _saveSession();
-        if (!mounted) return;
-        setState(() {
-          _messages.clear();
-          _pending.clear();
-          _sessionId = null;
-        });
-      }
+      // Continuity: route queries CONTINUE the current conversation (or the
+      // resumed one) — they never wipe it. Home submits, Chat keeps one
+      // running thread.
       _input.text = routeQuery;
       await _send(); // _send() clears _input after queueing the message
     } else {
@@ -229,13 +299,22 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _send() async {
     final text = _input.text.trim();
     if (text.isEmpty || _busy) return;
+    final image = _pendingImage;
+    final imageName = _pendingImageName;
     setState(() {
-      _messages.add(ChatMessage(role: 'user', content: text));
+      _messages.add(ChatMessage(
+        role: 'user',
+        content: text,
+        imageDataUrl: image,
+        hasImage: image != null,
+      ));
       _busy = true;
+      _pendingImage = null;
+      _pendingImageName = null;
     });
     _input.clear();
 
-    // Inject attached file content (from the Home File button) once.
+    // Inject attached file content (from Home or the chat paperclip) once.
     var effectiveRequest = text;
     final attachmentContent = _pendingAttachment;
     final attachmentName = _pendingAttachmentName;
@@ -386,8 +465,8 @@ class _ChatScreenState extends State<ChatScreen> {
             children: [
               if (_messages.isEmpty)
                 Text(projectService.projectName == null
-                    ? 'Ask anything about coding, architecture, APIs, debugging, or how to build your app.\n\nImport a project or connect GitHub when you want CodePilot to inspect and edit files.'
-                    : 'Ask things like:\n• Explain this project\n• Where is the API configured?\n• Fix the Flutter build error\n• Create a new screen',
+                    ? 'Ask anything about coding, architecture, APIs, debugging, or how to build your app.\n\nImport a project or connect GitHub when you want CodePilot to inspect and edit files.\n\n📎 Attach images or code files with the paperclip.'
+                    : 'Ask things like:\n• Explain this project\n• Where is the API configured?\n• Fix the Flutter build error\n• Create a new screen\n\n📎 Attach images or files with the paperclip.',
                     style: TextStyle(color: AppTheme.muted)),
               for (final m in _messages) _bubble(m),
               if (_streamBuf != null) _bubble(ChatMessage(role: 'assistant', content: '$_streamBuf▍')),
@@ -399,10 +478,56 @@ class _ChatScreenState extends State<ChatScreen> {
         SafeArea(
           child: Padding(
             padding: const EdgeInsets.fromLTRB(12, 4, 12, 10),
-            child: Row(children: [
-              Expanded(child: TextField(controller: _input, minLines: 1, maxLines: 4, onSubmitted: (_) => _send(), decoration: const InputDecoration(hintText: 'Ask or request a change…'))),
-              const SizedBox(width: 8),
-              IconButton.filled(onPressed: _busy ? null : _send, icon: const Icon(Icons.send)),
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              if (_hasPendingAttachment) ...[
+                Row(children: [
+                  Icon(
+                    _pendingImage != null ? Icons.image : Icons.description,
+                    size: 16,
+                    color: AppTheme.glowAccent,
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      'Attached: ${_pendingImageName ?? _pendingAttachmentName}',
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(color: AppTheme.muted, fontSize: 12),
+                    ),
+                  ),
+                  IconButton(
+                    visualDensity: VisualDensity.compact,
+                    icon: const Icon(Icons.close, size: 16, color: AppTheme.muted),
+                    onPressed: _clearAttachments,
+                  ),
+                ]),
+                const SizedBox(height: 4),
+              ],
+              Row(children: [
+                IconButton(
+                  tooltip: 'Attach image or file',
+                  icon: const Icon(Icons.attach_file, color: AppTheme.muted),
+                  onPressed: _busy ? null : _pickAttachment,
+                ),
+                Expanded(
+                  child: TextField(
+                    controller: _input,
+                    minLines: 1,
+                    maxLines: 5,
+                    textCapitalization: TextCapitalization.sentences,
+                    onSubmitted: (_) => _send(),
+                    style: const TextStyle(color: AppTheme.text),
+                    cursorColor: AppTheme.glowAccent,
+                    decoration: const InputDecoration(
+                      hintText: 'Ask or request a change…',
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                IconButton.filled(
+                  onPressed: _busy ? null : _send,
+                  icon: const Icon(Icons.arrow_upward),
+                ),
+              ]),
             ]),
           ),
         ),
@@ -423,9 +548,41 @@ class _ChatScreenState extends State<ChatScreen> {
           border: Border.all(color: m.isError ? AppTheme.err : AppTheme.border),
           borderRadius: BorderRadius.circular(12),
         ),
-        child: isUser
-            ? SelectableText(m.content, style: TextStyle(color: m.isError ? AppTheme.err : AppTheme.text))
-            : _AssistantBody(content: m.content, isError: m.isError),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+          if (m.hasImage && m.imageDataUrl != null) ...[
+            Builder(builder: (context) {
+              // Data URL: data:image/png;base64,<payload>
+              final comma = m.imageDataUrl!.indexOf(',');
+              final bytes = comma >= 0 && comma < m.imageDataUrl!.length - 1
+                  ? base64Decode(m.imageDataUrl!.substring(comma + 1))
+                  : null;
+              if (bytes == null) return const SizedBox.shrink();
+              return ClipRRect(
+                borderRadius: BorderRadius.circular(10),
+                child: Image.memory(
+                  bytes,
+                  width: 220,
+                  fit: BoxFit.cover,
+                  errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+                ),
+              );
+            }),
+            const SizedBox(height: 8),
+          ] else if (m.hasImage)
+            const Padding(
+              padding: EdgeInsets.only(bottom: 8),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                Icon(Icons.image, size: 14, color: AppTheme.muted),
+                SizedBox(width: 4),
+                Text('Image sent (not shown after restart)',
+                    style: TextStyle(color: AppTheme.muted, fontSize: 11)),
+              ]),
+            ),
+          if (isUser)
+            Flexible(child: SelectableText(m.content, style: TextStyle(color: m.isError ? AppTheme.err : AppTheme.text)))
+          else
+            _AssistantBody(content: m.content, isError: m.isError),
+        ]),
       ),
     );
   }

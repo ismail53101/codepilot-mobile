@@ -45,9 +45,21 @@ class ApiClient {
 
   Map<String, dynamic> _body(ApiSettings s, List<ChatMessage> messages,
       {bool stream = false, List<Map<String, dynamic>>? tools}) {
+    // Messages with an attached image use the OpenAI vision content-array
+    // format (text part + image_url part with a base64 data URL); plain
+    // messages keep the simple string form.
+    Object messageContent(ChatMessage m) {
+      final url = m.imageDataUrl;
+      if (url == null || url.isEmpty) return m.content;
+      return [
+        {'type': 'text', 'text': m.content.isEmpty ? 'Describe this image.' : m.content},
+        {'type': 'image_url', 'image_url': {'url': url}},
+      ];
+    }
+
     return {
       'model': s.modelId,
-      'messages': [for (final m in messages) {'role': m.role, 'content': m.content}],
+      'messages': [for (final m in messages) {'role': m.role, 'content': messageContent(m)}],
       'temperature': 0.2,
       'stream': stream,
       if (tools != null) ...{'tools': tools, 'tool_choice': 'auto'},

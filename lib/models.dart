@@ -78,14 +78,34 @@ class ChatMessage {
   final String content;
   final bool isError;
 
-  const ChatMessage({required this.role, required this.content, this.isError = false});
+  /// Base64 data-URL of an attached image (vision requests). Transient:
+  /// intentionally NOT serialized — session storage would overflow with
+  /// full images, so restored transcripts keep the [hasImage] marker only.
+  final String? imageDataUrl;
 
-  Map<String, dynamic> toJson() => {'role': role, 'content': content, if (isError) 'isError': true};
+  /// Whether this message carried an image (persisted for display).
+  final bool hasImage;
+
+  const ChatMessage({
+    required this.role,
+    required this.content,
+    this.isError = false,
+    this.imageDataUrl,
+    this.hasImage = false,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'role': role,
+        'content': content,
+        if (isError) 'isError': true,
+        if (hasImage) 'hasImage': true,
+      };
 
   factory ChatMessage.fromJson(Map<String, dynamic> j) => ChatMessage(
         role: (j['role'] as String?) ?? 'user',
         content: (j['content'] as String?) ?? '',
         isError: (j['isError'] as bool?) ?? false,
+        hasImage: (j['hasImage'] as bool?) ?? false,
       );
 }
 
