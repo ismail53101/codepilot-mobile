@@ -9,7 +9,7 @@ void main() {
     // The wordmark is rendered as a two-tone rich-text span.
     final wordmark = tester.widget<Text>(
         find.byKey(const ValueKey('codepilot_wordmark')));
-    final spans = wordmark.textSpan!.children!;
+    final spans = (wordmark.textSpan! as TextSpan).children!;
     expect(spans.length, 2);
     expect((spans[0] as TextSpan).text, 'Code');
     expect((spans[1] as TextSpan).text, 'Pilot');

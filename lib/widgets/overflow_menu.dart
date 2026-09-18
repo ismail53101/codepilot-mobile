@@ -98,7 +98,7 @@ class OverflowMenu extends StatelessWidget {
         gradient: LinearGradient(
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
-          colors: [
+          colors: const [
             AppTheme.navyPanel,
             AppTheme.surface,
           ],

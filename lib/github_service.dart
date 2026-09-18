@@ -23,7 +23,7 @@ class EmailOtpService {
   final Map<String, ({String code, DateTime expires})> _pending = {};
 
   String? _apiKey() {
-    final key = const String.fromEnvironment(
+    const key = String.fromEnvironment(
       'RESEND_API_KEY',
       defaultValue: '',
     );

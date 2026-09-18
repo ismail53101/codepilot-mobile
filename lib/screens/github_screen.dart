@@ -85,10 +85,12 @@ class _GitHubScreenState extends State<GitHubScreen> {
       final verified = await EmailOtpSheet.show(context);
       if (verified) {
         final email = await settingsStore.readEmailIdentity();
-        if (mounted) setState(() {
-          _emailIdentity = email;
-          _message = 'Email verified: $email';
-        });
+        if (mounted) {
+          setState(() {
+            _emailIdentity = email;
+            _message = 'Email verified: $email';
+          });
+        }
       }
     } finally {
       if (mounted) setState(() => _busy = false);
