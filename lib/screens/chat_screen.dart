@@ -626,23 +626,137 @@ class _AssistantBody extends StatelessWidget {
 
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       if (blocks.isEmpty)
-        SelectableText(content, style: TextStyle(color: isError ? AppTheme.err : AppTheme.text))
+        _MarkdownText(text: content, color: isError ? AppTheme.err : AppTheme.text)
       else ...[
         for (final b in blocks) ...[
           if (b.before.trim().isNotEmpty)
             Padding(
               padding: const EdgeInsets.only(bottom: 6),
-              child: SelectableText(b.before.trim(), style: TextStyle(color: isError ? AppTheme.err : AppTheme.text)),
+              child: _MarkdownText(text: b.before.trim(), color: isError ? AppTheme.err : AppTheme.text),
             ),
           _CodeBlock(lang: b.lang, code: b.code),
         ],
         if (rest.trim().isNotEmpty)
           Padding(
             padding: const EdgeInsets.only(top: 6),
-            child: SelectableText(rest.trim(), style: TextStyle(color: isError ? AppTheme.err : AppTheme.text)),
+            child: _MarkdownText(text: rest.trim(), color: isError ? AppTheme.err : AppTheme.text),
           ),
       ],
     ]);
+  }
+}
+
+/// Markdown-lite renderer for assistant prose: headings (#…), bullets
+/// ("* " or "- "), numbered items, **bold**, *italic*, and `inline code`.
+/// AI models emit Markdown heavily; rendering it keeps replies readable
+/// instead of showing raw ### and ** markers.
+class _MarkdownText extends StatelessWidget {
+  final String text;
+  final Color color;
+
+  const _MarkdownText({required this.text, required this.color});
+
+  static final _headingRe = RegExp(r'^(#{1,6})\s+(.*)$');
+  static final _bulletRe = RegExp(r'^\s*[-*•]\s+(.*)$');
+  static final _numberedRe = RegExp(r'^\s*(\d+)[.)]\s+(.*)$');
+  static final _inlineRe = RegExp(r'(\*\*([^*]+)\*\*)|(\*([^*]+)\*)|(`([^`]+)`)');
+
+  InlineSpan _inline(String line) {
+    final spans = <InlineSpan>[];
+    var cursor = 0;
+    for (final m in _inlineRe.allMatches(line)) {
+      if (m.start > cursor) {
+        spans.add(TextSpan(text: line.substring(cursor, m.start)));
+      }
+      if (m.group(2) != null) {
+        spans.add(TextSpan(
+            text: m.group(2), style: const TextStyle(fontWeight: FontWeight.w700)));
+      } else if (m.group(4) != null) {
+        spans.add(TextSpan(
+            text: m.group(4), style: const TextStyle(fontStyle: FontStyle.italic)));
+      } else if (m.group(6) != null) {
+        spans.add(TextSpan(
+          text: m.group(6),
+          style: const TextStyle(
+            fontFamily: 'monospace',
+            fontSize: 12.5,
+            color: AppTheme.glowAccent,
+            backgroundColor: AppTheme.bg,
+          ),
+        ));
+      }
+      cursor = m.end;
+    }
+    if (cursor < line.length) spans.add(TextSpan(text: line.substring(cursor)));
+    return TextSpan(style: TextStyle(color: color), children: spans);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final widgets = <Widget>[];
+    for (final line in text.split('\n')) {
+      final heading = _headingRe.firstMatch(line);
+      final bullet = _bulletRe.firstMatch(line);
+      final numbered = _numberedRe.firstMatch(line);
+
+      if (heading != null) {
+        final level = heading.group(1)!.length;
+        widgets.add(Padding(
+          padding: EdgeInsets.only(top: widgets.isEmpty ? 0 : 10, bottom: 2),
+          child: SelectableText.rich(
+            _inline(heading.group(2) ?? ''),
+            style: TextStyle(
+              color: color,
+              fontSize: level <= 2 ? 16 : 15,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ));
+      } else if (bullet != null) {
+        widgets.add(Padding(
+          padding: const EdgeInsets.symmetric(vertical: 2),
+          child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const SizedBox(width: 10),
+            Text('•  ', style: TextStyle(color: color)),
+            Expanded(
+              child: SelectableText.rich(
+                _inline(bullet.group(1) ?? ''),
+                style: TextStyle(color: color, fontSize: 14, height: 1.45),
+              ),
+            ),
+          ]),
+        ));
+      } else if (numbered != null) {
+        widgets.add(Padding(
+          padding: const EdgeInsets.symmetric(vertical: 2),
+          child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const SizedBox(width: 6),
+            SizedBox(
+              width: 22,
+              child: Text('${numbered.group(1)}.',
+                  style: TextStyle(color: color, fontWeight: FontWeight.w600)),
+            ),
+            Expanded(
+              child: SelectableText.rich(
+                _inline(numbered.group(2) ?? ''),
+                style: TextStyle(color: color, fontSize: 14, height: 1.45),
+              ),
+            ),
+          ]),
+        ));
+      } else if (line.trim().isEmpty) {
+        widgets.add(const SizedBox(height: 8));
+      } else {
+        widgets.add(Padding(
+          padding: const EdgeInsets.symmetric(vertical: 1),
+          child: SelectableText.rich(
+            _inline(line),
+            style: TextStyle(color: color, fontSize: 14, height: 1.45),
+          ),
+        ));
+      }
+    }
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: widgets);
   }
 }
 
