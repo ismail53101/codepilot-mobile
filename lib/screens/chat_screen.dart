@@ -44,13 +44,16 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _initFromRoute() async {
     if (!mounted) return;
     final arg = ModalRoute.of(context)?.settings.arguments;
-    if (arg is String && arg.isNotEmpty && _input.text.isEmpty) {
-      setState(() => _input.text = arg);
+
+    // A query passed from the Home composer (or File Preview "Ask AI") is
+    // the user's FIRST MESSAGE — send it immediately so there is exactly one
+    // composer in play: Home submits, Chat answers and owns follow-ups.
+    String? routeQuery;
+    if (arg is String && arg.isNotEmpty) {
+      routeQuery = arg;
     } else if (arg is Map) {
       final query = arg['query'];
-      if (query is String && query.isNotEmpty && _input.text.isEmpty) {
-        setState(() => _input.text = query);
-      }
+      if (query is String && query.isNotEmpty) routeQuery = query;
       if (arg['attachmentName'] is String && arg['attachmentContent'] is String) {
         setState(() {
           _pendingAttachmentName = arg['attachmentName'] as String;
@@ -58,6 +61,7 @@ class _ChatScreenState extends State<ChatScreen> {
         });
       }
     }
+
     // Resume the most recent conversation silently (memory across restarts).
     if (!_restored) {
       final sessions = await chatSessionStore.load();
@@ -69,6 +73,23 @@ class _ChatScreenState extends State<ChatScreen> {
           _messages.addAll(sessions.first.messages);
         }
       });
+    }
+
+    if (routeQuery != null) {
+      // Route queries start a NEW conversation rather than appending to the
+      // resumed one, so "Hi" from Home cannot land in an unrelated thread.
+      if (_sessionId != null) {
+        await _saveSession();
+        if (!mounted) return;
+        setState(() {
+          _messages.clear();
+          _pending.clear();
+          _sessionId = null;
+        });
+      }
+      _input.text = routeQuery;
+      await _send(); // _send() clears _input after queueing the message
+    } else {
       _scrollDown();
     }
   }
@@ -248,13 +269,16 @@ class _ChatScreenState extends State<ChatScreen> {
         final buf = StringBuffer();
         await for (final piece in apiClient.chatStream(messages)) {
           buf.write(piece);
+          if (!mounted) return; // user left the screen — stop stream updates
           setState(() => _streamBuf = buf.toString());
         }
         reply = buf.toString();
+        if (!mounted) return;
         setState(() => _streamBuf = null);
       } else {
         reply = await apiClient.chat(messages);
       }
+      if (!mounted) return;
 
       final parsed = AgentService.parseReply(reply);
       setState(() {
@@ -276,6 +300,7 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _push(String role, String content, {bool isError = false}) {
+    if (!mounted) return; // async caller may outlive the screen
     setState(() => _messages.add(ChatMessage(role: role, content: content, isError: isError)));
     _scrollDown();
   }

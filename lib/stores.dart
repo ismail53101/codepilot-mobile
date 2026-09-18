@@ -235,13 +235,17 @@ class ChatSessionStore {
   static const _kSessions = 'chat_sessions';
   static const maxSessions = 30;
 
+  /// Returns a fresh MUTABLE list (newest first). Callers may filter/reorder
+  /// it — never return a `const` list from here: save()/remove() mutate the
+  /// result, and a const list would throw "Cannot remove from an
+  /// unmodifiable list" (this exact bug broke first-run chat saves).
   Future<List<ChatSession>> load() async {
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getString(_kSessions);
-    if (raw == null) return const [];
+    if (raw == null) return <ChatSession>[];
     try {
       final list = jsonDecode(raw) as List;
-      return [
+      return <ChatSession>[
         for (final item in list)
           if (item is Map)
             ChatSession(
@@ -255,7 +259,7 @@ class ChatSessionStore {
             ),
       ]..removeWhere((s) => s.id.isEmpty || s.messages.isEmpty);
     } catch (_) {
-      return const [];
+      return <ChatSession>[];
     }
   }
 
@@ -264,7 +268,9 @@ class ChatSessionStore {
   Future<void> save({required String? existingId, required String title, required List<ChatMessage> messages}) async {
     if (messages.isEmpty) return;
     final id = existingId ?? DateTime.now().microsecondsSinceEpoch.toString();
-    final sessions = await load();
+    // Mutable copy — load() is documented mutable, but copy defensively so
+    // future refactors can never reintroduce unmodifiable-list mutations.
+    final sessions = List<ChatSession>.of(await load());
     sessions.removeWhere((s) => s.id == id);
     sessions.insert(
       0,
@@ -290,7 +296,7 @@ class ChatSessionStore {
   }
 
   Future<void> remove(String id) async {
-    final sessions = await load();
+    final sessions = List<ChatSession>.of(await load());
     sessions.removeWhere((s) => s.id == id);
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_kSessions, jsonEncode([
