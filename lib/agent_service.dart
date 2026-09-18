@@ -192,6 +192,7 @@ Rules:
 - Never invent file contents you have not seen; use the provided context only.
 - Never include API keys or secrets in code.
 - If PROJECT: none imported, answer as a helpful general coding assistant and do not output change blocks.
+- Changes are applied to the local workspace when the user confirms; the user can then publish them to their GitHub repository with the chat screen's Publish (cloud_upload) button, which commits directly to the default branch. You cannot run builds/compilers or execute Git commands yourself.
 - Keep explanations concise.''';
 
   /// Parse the model reply into text + proposed changes.
@@ -216,7 +217,10 @@ Rules:
       ));
       consumed = consumed.replaceFirst(m.group(0)!, '');
     }
-    explanation.write(consumed.replaceAll('```', '').trim());
+    // Keep ordinary ``` fences intact so the chat renderer can display
+    // code blocks with syntax highlighting; only codepilot: blocks were
+    // removed above. (Stripping all fences here used to break that.)
+    explanation.write(consumed.trim());
     return (explanation: explanation.toString(), changes: changes);
   }
 }

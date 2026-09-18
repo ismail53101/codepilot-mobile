@@ -9,6 +9,7 @@ import '../api_client.dart';
 import '../github_service.dart';
 import '../main.dart';
 import '../models.dart';
+import '../pdf_text.dart';
 import '../project_service.dart';
 import '../stores.dart';
 import '../theme.dart';
@@ -77,6 +78,35 @@ class _ChatScreenState extends State<ChatScreen> {
           _pendingImage = 'data:image/$ext;base64,${base64Encode(bytes)}';
           _pendingImageName = file.name;
         });
+        return;
+      }
+
+      if (ext == 'pdf') {
+        final bytes = file.bytes;
+        if (bytes == null) {
+          _push('system', 'Could not read the PDF.', isError: true);
+          return;
+        }
+        try {
+          final result = PdfText.extract(bytes);
+          if (result.scanned) {
+            _push('system',
+                '"${file.name}" is a scanned PDF (page images, no text layer). It has no extractable text — attach screenshots of the pages instead.',
+                isError: true);
+            return;
+          }
+          if (result.text.trim().isEmpty) {
+            _push('system', 'No text could be extracted from "${file.name}".', isError: true);
+            return;
+          }
+          setState(() {
+            _pendingAttachment = result.text;
+            _pendingAttachmentName = '${file.name} (PDF text)';
+          });
+        } catch (_) {
+          _push('system', 'Could not extract text from "${file.name}" — it may be corrupted or password-protected.',
+              isError: true);
+        }
         return;
       }
 
@@ -338,7 +368,13 @@ class _ChatScreenState extends State<ChatScreen> {
       final messages = <ChatMessage>[
         const ChatMessage(role: 'system', content: AgentService.systemPrompt),
         ChatMessage(role: 'user', content: context),
-        ...history.map((m) => ChatMessage(role: m.role == 'system' ? 'assistant' : m.role, content: m.content)),
+        ...history.map((m) => ChatMessage(
+              role: m.role == 'system' ? 'assistant' : m.role,
+              content: m.content,
+              // Keep attached images so the vision format actually reaches
+              // the API (ApiClient sends image_url parts for these).
+              imageDataUrl: m.imageDataUrl,
+            )),
       ];
 
       final settings = await settingsStore.load();
@@ -503,7 +539,7 @@ class _ChatScreenState extends State<ChatScreen> {
               ],
               Row(children: [
                 IconButton(
-                  tooltip: 'Attach image or file',
+                  tooltip: 'Attach image, PDF, or file',
                   icon: const Icon(Icons.attach_file, color: AppTheme.muted),
                   onPressed: _busy ? null : _pickAttachment,
                 ),
