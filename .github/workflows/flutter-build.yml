@@ -30,6 +30,10 @@ jobs:
           # INTERNET permission in the MAIN manifest (debug manifests have it
           # by default; release APKs would lose device flow + API access).
           grep -q 'android.permission.INTERNET' android/app/src/main/AndroidManifest.xml || sed -i 's#<application#<uses-permission android:name="android.permission.INTERNET"/>\n    <application#' android/app/src/main/AndroidManifest.xml
+          # Plugins (file_picker, secure_storage, share_plus, …) require NDK
+          # 26.x; the template pins an older one. NDK is backward compatible.
+          sed -i 's/ndkVersion = flutter.ndkVersion/ndkVersion = "26.1.10909125"/' android/app/build.gradle
+          sed -i 's/ndkVersion flutter.ndkVersion/ndkVersion "26.1.10909125"/' android/app/build.gradle
       # Google Play upload signing: decode the keystore from the
       # KEYSTORE_BASE64 secret and write android/key.properties for Gradle.
       # Without these secrets, release builds fall back to debug signing

@@ -23,13 +23,39 @@ class Integration {
     this.accent = AppTheme.glowAccent,
   });
 
-  factory Integration.fromJson(Map<String, dynamic> j) => Integration(
-        id: j['id'] as String,
-        name: j['name'] as String,
-        subtitle: (j['subtitle'] as String?) ?? '',
-        icon: IconData(j['iconCode'] as int, fontFamily: 'MaterialIcons'),
-        accent: Color(j['accentValue'] as int? ?? AppTheme.glowAccent.value),
-      );
+  /// Const icon palette for persisted integrations. Restoring icons from
+  /// stored code points must go through this list — constructing IconData
+  /// dynamically breaks release icon tree-shaking.
+  static const _iconPalette = [
+    Icons.extension,
+    Icons.folder_outlined,
+    Icons.link,
+    Icons.cloud_outlined,
+    Icons.code,
+    Icons.account_tree_outlined,
+    Icons.call_split,
+    Icons.upload_file,
+    Icons.hub_outlined,
+    Icons.bolt,
+  ];
+
+  factory Integration.fromJson(Map<String, dynamic> j) {
+    final code = j['iconCode'] as int?;
+    IconData icon = Icons.extension;
+    for (final candidate in _iconPalette) {
+      if (candidate.codePoint == code) {
+        icon = candidate;
+        break;
+      }
+    }
+    return Integration(
+      id: j['id'] as String,
+      name: j['name'] as String,
+      subtitle: (j['subtitle'] as String?) ?? '',
+      icon: icon,
+      accent: Color(j['accentValue'] as int? ?? AppTheme.glowAccent.value),
+    );
+  }
 
   Map<String, dynamic> toJson() => {
         'id': id,
