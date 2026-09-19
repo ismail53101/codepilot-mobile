@@ -24,32 +24,37 @@ class CodePilotHeader extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.fromLTRB(20, 8, 8, 0),
       child: Row(children: [
-        const Text.rich(
-          TextSpan(
-            children: [
-              TextSpan(
-                text: 'Code',
-                style: TextStyle(
-                  color: AppTheme.text,
-                  fontSize: 34,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: -0.5,
+        // Flexible: the wordmark shrinks (never overflows) on narrow
+        // screens where wordmark + Create Project + menu exceed the width.
+        Flexible(
+          child: const Text.rich(
+            TextSpan(
+              children: [
+                TextSpan(
+                  text: 'Code',
+                  style: TextStyle(
+                    color: AppTheme.text,
+                    fontSize: 34,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: -0.5,
+                  ),
                 ),
-              ),
-              TextSpan(
-                text: 'Pilot',
-                style: TextStyle(
-                  color: AppTheme.glowAccent,
-                  fontSize: 34,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: -0.5,
+                TextSpan(
+                  text: 'Pilot',
+                  style: TextStyle(
+                    color: AppTheme.glowAccent,
+                    fontSize: 34,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: -0.5,
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
+            key: ValueKey('codepilot_wordmark'),
+            overflow: TextOverflow.ellipsis,
+            maxLines: 1,
           ),
-          key: ValueKey('codepilot_wordmark'),
         ),
-        const Spacer(),
         if (onCreateProject != null)
           // Flexible + FittedBox: shrinks instead of overflowing on small
           // phones where wordmark + action + menu exceed the width.
@@ -59,19 +64,19 @@ class CodePilotHeader extends StatelessWidget {
               behavior: HitTestBehavior.opaque,
               child: Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                child: Row(mainAxisSize: MainAxisSize.min, children: const [
-                  Icon(Icons.add_circle_outline,
-                      size: 18, color: AppTheme.text),
-                  SizedBox(width: 6),
-                  FittedBox(
-                    fit: BoxFit.scaleDown,
-                    child: Text('Create Project',
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Row(mainAxisSize: MainAxisSize.min, children: const [
+                    Icon(Icons.add_circle_outline,
+                        size: 18, color: AppTheme.text),
+                    SizedBox(width: 6),
+                    Text('Create Project',
                         style: TextStyle(
                             color: AppTheme.text,
                             fontSize: 15,
                             fontWeight: FontWeight.w600)),
-                  ),
-                ]),
+                  ]),
+                ),
               ),
             ),
           ),
