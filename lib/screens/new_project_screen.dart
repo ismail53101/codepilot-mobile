@@ -108,10 +108,10 @@ class _NewProjectScreenState extends State<NewProjectScreen> {
                     borderRadius: BorderRadius.circular(12),
                     border: Border.all(color: AppTheme.border),
                   ),
-                  child: Row(children: [
-                    const Icon(Icons.info_outline,
+                  child: Row(children: const [
+                    Icon(Icons.info_outline,
                         size: 16, color: AppTheme.glowAccent),
-                    const SizedBox(width: 8),
+                    SizedBox(width: 8),
                     Expanded(
                       child: Text(
                         'Created locally on this device. GitHub is optional — '
