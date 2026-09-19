@@ -1163,13 +1163,47 @@ class _CodeBlock extends StatelessWidget {
           const SizedBox(width: 10),
           Text(lang ?? 'code', style: const TextStyle(color: AppTheme.muted, fontSize: 11)),
           const Spacer(),
-          if (lang != null && const ['html', 'htm'].contains(lang!.toLowerCase()))
+          if (lang != null && const ['html', 'htm'].contains(lang!.toLowerCase())) ...[
+            // When a project is open, offer the FULL project preview (the
+            // agent's written files, with its CSS/JS/assets) first — the
+            // inline snippet preview stays available as a second button.
+            if (projectService.rootPath != null) ...[
+              IconButton(
+                visualDensity: VisualDensity.compact,
+                tooltip: 'Preview project (index.html)',
+                icon: const Icon(Icons.open_in_new, size: 16, color: AppTheme.glowAccent),
+                onPressed: () {
+                  final root = projectService.rootPath!;
+                  final candidates = [
+                    'index.html',
+                    'src/index.html',
+                    'public/index.html',
+                    'pages/index.html',
+                  ];
+                  String? entry;
+                  for (final c in candidates) {
+                    if (projectService.readFile(c) != null) {
+                      entry = c;
+                      break;
+                    }
+                  }
+                  if (entry != null) {
+                    openHtmlPreview(context, path: entry);
+                  } else {
+                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                        content: Text('No index.html found in the project — open a page from the Explorer first.'),
+                        duration: Duration(seconds: 2)));
+                  }
+                },
+              ),
+            ],
             IconButton(
               visualDensity: VisualDensity.compact,
-              tooltip: 'Live preview',
+              tooltip: 'Preview this code block',
               icon: const Icon(Icons.play_arrow, size: 17, color: AppTheme.ok),
               onPressed: () => openHtmlPreview(context, rawHtml: code),
             ),
+          ],
           IconButton(
             visualDensity: VisualDensity.compact,
             tooltip: 'Copy code',
