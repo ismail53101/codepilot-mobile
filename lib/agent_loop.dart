@@ -120,7 +120,8 @@ class AgentLoop {
 
       final ({String content, List<ToolCall> toolCalls}) resp;
       try {
-        resp = await backend.chatWithTools(messages, tools: registry.schemas());
+        resp = await backend
+            .chatWithTools(messages, tools: registry.schemas());
       } on ApiException catch (e) {
         _failures.add(AgentFailed(e.message));
         rethrow;

@@ -3,8 +3,6 @@ import 'dart:io';
 
 import 'package:path/path.dart' as p;
 
-import 'project_service.dart';
-
 /// Real shell execution on Android, inside the project directory.
 ///
 /// Reality on a stock Android device: `sh`/`toybox` exist, so many

@@ -299,13 +299,14 @@ class ProjectService {
 
   /// Direct children (one level) of a directory, relative paths.
   List<FileNode> listDir(String rel) {
-    final dir = resolveFile(rel);
-    if (!dir.existsSync()) {
+    final resolved = resolveFile(rel);
+    if (!resolved.existsSync()) {
       throw ProjectException('Directory not found: $rel');
     }
-    if (dir is! Directory) {
+    if (resolved is! Directory) {
       throw ProjectException('Not a directory: $rel');
     }
+    final dir = resolved;
     final out = <FileNode>[];
     for (final e in dir.listSync()) {
       final r = p.relative(e.path, from: root.path).replaceAll('\\', '/');
@@ -439,7 +440,7 @@ class ProjectService {
       }
     }
     if (branch == null) return null;
-    return (branch: branch, head: head ?? 'unknown');
+    return (branch: branch, head: head!);
   }
 
   /// Unified line diff between two strings.

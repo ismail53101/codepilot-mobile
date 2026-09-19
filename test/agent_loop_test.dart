@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 
@@ -27,7 +26,7 @@ class _FakeBackend implements ChatBackend {
   }) async {
     requestCount++;
     if (callIndex >= script.length) {
-      return (content: 'done', toolCalls: const []);
+      return (content: 'done', toolCalls: const <ToolCall>[]);
     }
     return script[callIndex++];
   }
@@ -78,7 +77,7 @@ void main() {
       final registry = _registry(_makeService());
       final schemas = registry.schemas();
       final names = [
-        for (final s in schemas) (s['function'] as Map)['name'] as String
+        for (final s in schemas) (s['function'] as Map)['name'] as String,
       ];
       for (final expected in [
         'list_files',

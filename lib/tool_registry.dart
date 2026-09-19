@@ -1,7 +1,6 @@
 import 'dart:io';
 
 import 'github_service.dart';
-import 'models.dart';
 import 'project_service.dart';
 import 'terminal_executor.dart';
 
@@ -108,7 +107,8 @@ class ToolRegistry {
         _ciStatus(),
       ];
 
-  Map<String, dynamic> schemas() => [for (final t in buildTools()) t.toSchema()];
+  List<Map<String, dynamic>> schemas() =>
+      [for (final t in buildTools()) t.toSchema()];
 
   /// Execute a tool call by name. Returns the string result for the model.
   Future<String> execute(String name, Map<String, dynamic> args) async {
