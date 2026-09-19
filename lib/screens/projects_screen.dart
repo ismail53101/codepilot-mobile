@@ -7,8 +7,9 @@ import '../main.dart';
 import '../project_service.dart';
 import '../theme.dart';
 
-/// Projects screen: every imported project on the device. Opens one, offers
-/// deletion, and links to ZIP import. Never shown on the Home screen.
+/// Projects screen: every local project (imported, created, or cloned).
+/// Opens one, offers deletion, and links to ZIP import / New Project.
+/// GitHub is NOT a prerequisite — this is the project home.
 class ProjectsScreen extends StatefulWidget {
   const ProjectsScreen({super.key});
 
@@ -45,6 +46,11 @@ class _ProjectsScreenState extends State<ProjectsScreen> {
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text(e.message)));
     }
+  }
+
+  Future<void> _newProject() async {
+    await Navigator.pushNamed(context, '/new-project');
+    if (mounted) _refresh();
   }
 
   Future<void> _delete(String name) async {
@@ -84,7 +90,12 @@ class _ProjectsScreenState extends State<ProjectsScreen> {
         title: const Text('Projects'),
         actions: [
           IconButton(
-            icon: const Icon(Icons.add),
+            icon: const Icon(Icons.note_add_outlined),
+            tooltip: 'Create new project',
+            onPressed: _newProject,
+          ),
+          IconButton(
+            icon: const Icon(Icons.archive_outlined),
             tooltip: 'Import project ZIP',
             onPressed: () => Navigator.pushNamed(context, '/import'),
           ),
@@ -95,23 +106,33 @@ class _ProjectsScreenState extends State<ProjectsScreen> {
           : RefreshIndicator(
               onRefresh: _refresh,
               child: _projects.isEmpty
-                  ? ListView(children: const [
+                  ? ListView(children: [
                       Padding(
-                        padding: EdgeInsets.all(32),
+                        padding: const EdgeInsets.all(32),
                         child: Column(children: [
-                          Icon(Icons.folder_open,
+                          const Icon(Icons.folder_open,
                               size: 56, color: AppTheme.muted),
-                          SizedBox(height: 12),
-                          Text('No projects yet',
+                          const SizedBox(height: 12),
+                          const Text('No projects yet',
                               style: TextStyle(
                                   color: AppTheme.text,
                                   fontSize: 16,
                                   fontWeight: FontWeight.w600)),
-                          SizedBox(height: 6),
-                          Text(
-                              'Import a project ZIP to start working with CodePilot.',
+                          const SizedBox(height: 6),
+                          const Text(
+                              'Create a new project or import a ZIP to start working with the CodePilot agent.',
                               textAlign: TextAlign.center,
                               style: TextStyle(color: AppTheme.muted)),
+                          const SizedBox(height: 16),
+                          FilledButton.icon(
+                            style: FilledButton.styleFrom(
+                              backgroundColor: AppTheme.glowAccent,
+                              foregroundColor: Colors.black,
+                            ),
+                            onPressed: _newProject,
+                            icon: const Icon(Icons.add, size: 18),
+                            label: const Text('Create Project'),
+                          ),
                         ]),
                       ),
                     ])

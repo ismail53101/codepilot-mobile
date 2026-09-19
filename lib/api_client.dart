@@ -7,13 +7,32 @@ import 'package:http/http.dart' as http;
 import 'models.dart';
 import 'stores.dart';
 
+/// Cooperative cancellation for in-flight HTTP. Closing the underlying
+/// socket aborts the pending request immediately, so Stop responds instantly
+/// instead of waiting out the timeout.
+class CancelToken {
+  final Completer<void> _completer = Completer<void>();
+  bool _cancelled = false;
+
+  bool get isCancelled => _cancelled;
+  Future<void> get future => _completer.future;
+
+  void cancel() {
+    if (_cancelled) return;
+    _cancelled = true;
+    if (!_completer.isCompleted) _completer.complete();
+  }
+}
+
 /// Minimal interface the agent loop depends on — lets tests drive the loop
 /// with a fake backend (no network).
 abstract class ChatBackend {
   Future<({String content, List<ToolCall> toolCalls})> chatWithTools(
       List<ChatMessage> messages,
       {List<Map<String, dynamic>>? tools,
-      int? timeoutSeconds});
+      int? timeoutSeconds,
+      CancelToken? cancelToken,
+      int retries});
 }
 
 /// OpenAI-compatible client: /chat/completions (+SSE streaming) and /models.
@@ -94,6 +113,17 @@ class ApiClient implements ChatBackend {
     return m.content;
   }
 
+  /// Registers [client] so that cancelling [token] closes it, aborting the
+  /// in-flight request. Returns the client for the caller's try/finally.
+  http.Client _cancellableClient(CancelToken? token) {
+    final client = http.Client();
+    if (token != null) {
+      // close() aborts the socket; a later close() in finally is a no-op.
+      unawaited(token.future.then((_) => client.close()));
+    }
+    return client;
+  }
+
   /// Non-streaming completion that also returns OpenAI tool_calls so the
   /// agent loop can execute tools. Falls back gracefully when the provider
   /// omits tool support (content-only response).
@@ -101,15 +131,22 @@ class ApiClient implements ChatBackend {
   Future<({String content, List<ToolCall> toolCalls})> chatWithTools(
       List<ChatMessage> messages,
       {List<Map<String, dynamic>>? tools,
-      int? timeoutSeconds}) async {
+      int? timeoutSeconds,
+      CancelToken? cancelToken,
+      int retries = _maxAttempts}) async {
     final (s: s, key: key) = await _cfg();
     final timeout = Duration(seconds: timeoutSeconds ?? s.requestTimeout);
     final url = _uri(s, '/chat/completions');
+    final attempts = retries.clamp(1, _maxAttempts);
 
     Object? lastErr;
-    for (var attempt = 1; attempt <= _maxAttempts; attempt++) {
+    for (var attempt = 1; attempt <= attempts; attempt++) {
+      if (cancelToken?.isCancelled ?? false) {
+        throw const ApiException('Cancelled.', 'cancelled');
+      }
+      final client = _cancellableClient(cancelToken);
       try {
-        final resp = await http
+        final resp = await client
             .post(url, headers: _headers(key), body: jsonEncode(_body(s, messages, tools: tools)))
             .timeout(timeout);
         if (resp.statusCode == 200) {
@@ -154,11 +191,18 @@ class ApiClient implements ChatBackend {
       } on SocketException catch (e) {
         lastErr = ApiException('Network error: ${e.message}', 'network');
       } on http.ClientException catch (e) {
+        // A cancel closes the client mid-request and surfaces here — report
+        // it as cancelled, not as a network failure.
+        if (cancelToken?.isCancelled ?? false) {
+          throw const ApiException('Cancelled.', 'cancelled');
+        }
         lastErr = ApiException('Network error: ${e.message}', 'network');
       } on ApiException {
         rethrow; // status errors: already classified
+      } finally {
+        client.close();
       }
-      if (attempt < _maxAttempts) {
+      if (attempt < attempts) {
         await Future.delayed(Duration(seconds: (1 << attempt).clamp(2, _retryCap.inSeconds)));
       }
     }

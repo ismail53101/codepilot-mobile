@@ -23,12 +23,56 @@ class _FakeBackend implements ChatBackend {
     List<ChatMessage> messages, {
     List<Map<String, dynamic>>? tools,
     int? timeoutSeconds,
+    CancelToken? cancelToken,
+    int retries = 3,
   }) async {
     requestCount++;
+    if (cancelToken?.isCancelled ?? false) {
+      throw const ApiException('Cancelled.', 'cancelled');
+    }
     if (callIndex >= script.length) {
       return (content: 'done', toolCalls: const <ToolCall>[]);
     }
     return script[callIndex++];
+  }
+}
+
+/// Backend that always throws — drives the FAILED path.
+class _FailingBackend implements ChatBackend {
+  final ApiException error;
+  _FailingBackend(this.error);
+
+  @override
+  Future<({String content, List<ToolCall> toolCalls})> chatWithTools(
+    List<ChatMessage> messages, {
+    List<Map<String, dynamic>>? tools,
+    int? timeoutSeconds,
+    CancelToken? cancelToken,
+    int retries = 3,
+  }) async {
+    throw error;
+  }
+}
+
+/// Backend that hangs until its CancelToken fires — drives timeout/cancel.
+class _HangingBackend implements ChatBackend {
+  bool cancelled = false;
+
+  @override
+  Future<({String content, List<ToolCall> toolCalls})> chatWithTools(
+    List<ChatMessage> messages, {
+    List<Map<String, dynamic>>? tools,
+    int? timeoutSeconds,
+    CancelToken? cancelToken,
+    int retries = 3,
+  }) async {
+    if (cancelToken != null) {
+      await cancelToken.future;
+      cancelled = true;
+      throw const ApiException('Cancelled.', 'cancelled');
+    }
+    await Completer<void>().future; // hang forever
+    return (content: '', toolCalls: const <ToolCall>[]);
   }
 }
 
@@ -204,6 +248,118 @@ void main() {
       expect(reply, 'Wrote a.txt');
       // Steps were emitted (either the write or the no-project error).
       expect(events, isNotEmpty);
+    });
+  });
+
+  group('Agent lifecycle states', () {
+    test('success finalizes as COMPLETED exactly once', () async {
+      final backend = _FakeBackend([
+        (content: 'All done.', toolCalls: const []),
+      ]);
+      final loop = AgentLoop(
+        backend: backend,
+        registry: _registry(ProjectService()),
+        projects: ProjectService(),
+      );
+      final outcomes = <AgentOutcome>[];
+      final sub = loop.outcome.listen(outcomes.add);
+      await loop.run('hello');
+      await sub.cancel();
+      expect(loop.state, AgentTaskState.completed);
+      expect(outcomes.length, 1);
+      expect(outcomes.single.state, AgentTaskState.completed);
+    });
+
+    test('backend error finalizes as FAILED with the message', () async {
+      final backend = _FailingBackend(const ApiException('boom', 'provider'));
+      final loop = AgentLoop(
+        backend: backend,
+        registry: _registry(ProjectService()),
+        projects: ProjectService(),
+      );
+      final outcomes = <AgentOutcome>[];
+      final sub = loop.outcome.listen(outcomes.add);
+      await loop.run('hello');
+      await sub.cancel();
+      expect(loop.state, AgentTaskState.failed);
+      expect(outcomes.single.state, AgentTaskState.failed);
+      expect(outcomes.single.message, contains('boom'));
+    });
+
+    test('watchdog timeout finalizes as FAILED', () async {
+      final backend = _HangingBackend();
+      final loop = AgentLoop(
+        backend: backend,
+        registry: _registry(ProjectService()),
+        projects: ProjectService(),
+        taskTimeout: const Duration(milliseconds: 80),
+      );
+      final outcomes = <AgentOutcome>[];
+      final sub = loop.outcome.listen(outcomes.add);
+      await loop.run('hang');
+      await sub.cancel();
+      expect(loop.state, AgentTaskState.failed);
+      expect(outcomes.single.state, AgentTaskState.failed);
+      expect(outcomes.single.message, contains('timed out'));
+    });
+
+    test('cancel finalizes as CANCELLED even with in-flight backend', () async {
+      final backend = _HangingBackend();
+      final loop = AgentLoop(
+        backend: backend,
+        registry: _registry(ProjectService()),
+        projects: ProjectService(),
+      );
+      final outcomes = <AgentOutcome>[];
+      final sub = loop.outcome.listen(outcomes.add);
+      // The backend hangs forever unless cancelled; the loop must observe
+      // the CancelToken and abort.
+      final runFuture = loop.run('hang');
+      await Future.delayed(const Duration(milliseconds: 20));
+      loop.cancel();
+      await runFuture;
+      await sub.cancel();
+      expect(loop.state, AgentTaskState.cancelled);
+      expect(outcomes.single.state, AgentTaskState.cancelled);
+      expect(backend.cancelled, isTrue);
+    });
+
+    test('late duplicate finalize attempts are ignored', () async {
+      final backend = _FakeBackend([
+        (content: 'done', toolCalls: const []),
+      ]);
+      final loop = AgentLoop(
+        backend: backend,
+        registry: _registry(ProjectService()),
+        projects: ProjectService(),
+      );
+      final outcomes = <AgentOutcome>[];
+      final sub = loop.outcome.listen(outcomes.add);
+      await loop.run('hello');
+      // Simulate a late duplicate completion — must not emit again.
+      loop.cancel();
+      await sub.cancel();
+      expect(outcomes.length, 1); // only the real completion
+    });
+  });
+
+  group('ProjectTemplate', () {
+    test('all templates have unique ids and real file entries', () {
+      final ids = [for (final t in ProjectTemplate.all) t.id];
+      expect(ids.toSet().length, ids.length);
+      for (final t in ProjectTemplate.all) {
+        expect(t.label, isNotEmpty);
+        for (final f in t.files) {
+          expect(f.path, isNot(startsWith('/')));
+          expect(f.content, isNotEmpty);
+        }
+      }
+    });
+
+    test('flutter template contains pubspec and main.dart', () {
+      final paths = [for (final f in ProjectTemplate.flutterApp.files) f.path];
+      expect(paths, contains('pubspec.yaml'));
+      expect(paths, contains('lib/main.dart'));
     });
   });
 

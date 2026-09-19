@@ -47,6 +47,12 @@ class _HomeScreenState extends State<HomeScreen> {
 
   static const _menuItems = [
     OverflowMenuItem(
+      id: 'new_project',
+      title: 'New Project',
+      subtitle: 'Create a local workspace',
+      icon: Icons.note_add_outlined,
+    ),
+    OverflowMenuItem(
       id: 'projects',
       title: 'Projects',
       subtitle: 'View & manage projects',
@@ -81,6 +87,8 @@ class _HomeScreenState extends State<HomeScreen> {
 
   void _onMenuSelected(String id) {
     switch (id) {
+      case 'new_project':
+        Navigator.pushNamed(context, '/new-project');
       case 'projects':
         Navigator.pushNamed(context, '/projects');
       case 'history':

@@ -16,6 +16,7 @@ import 'screens/home_screen.dart';
 import 'screens/github_screen.dart';
 import 'screens/import_screen.dart';
 import 'screens/integrations_screen.dart';
+import 'screens/new_project_screen.dart';
 import 'screens/preview_screen.dart';
 import 'screens/projects_screen.dart';
 import 'screens/search_history_screen.dart';
@@ -71,6 +72,7 @@ class CodePilotApp extends StatelessWidget {
         '/api': (_) => const ApiSettingsScreen(),
         '/github': (_) => const GitHubScreen(),
         '/projects': (_) => const ProjectsScreen(),
+        '/new-project': (_) => const NewProjectScreen(),
         '/history': (_) => const SearchHistoryScreen(),
         '/integrations': (_) => const IntegrationsScreen(),
         '/help': (_) => const HelpFeedbackScreen(),

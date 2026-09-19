@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:archive/archive_io.dart';
+import 'package:flutter/material.dart' show IconData;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -184,15 +185,62 @@ class ProjectService {
 
   /// Create an empty project (e.g. from "New project").
   Future<String> createProject(String name) async {
-    final clean = name.replaceAll(RegExp(r'[^\w\-. ]'), '_').trim();
-    if (clean.isEmpty) throw const ProjectException('Project name is empty.');
+    final clean = _cleanProjectName(name);
     final dir = await projectsDir();
     final root = Directory(p.join(dir.path, clean));
     if (root.existsSync()) {
       throw ProjectException('A project named "$clean" already exists.');
     }
     root.createSync(recursive: true);
-    File(p.join(root.path, '.codepilot_project')).writeAsStringSync(clean);
+    _writeProjectMarker(root, clean, ProjectTemplate.blank);
+    _root = root;
+    _projectName = clean;
+    await _persistLastProject();
+    await snapshotBaseline();
+    return clean;
+  }
+
+  String _cleanProjectName(String name) {
+    final clean = name.replaceAll(RegExp(r'[^\w\-. ]'), '_').trim();
+    if (clean.isEmpty) throw const ProjectException('Project name is empty.');
+    return clean;
+  }
+
+  void _writeProjectMarker(Directory root, String name, ProjectTemplate t) {
+    File(p.join(root.path, '.codepilot_project')).writeAsStringSync(
+        jsonEncode({
+          'name': name,
+          'template': t.id,
+          'created': DateTime.now().toIso8601String(),
+        }),
+        flush: true);
+  }
+
+  /// Create a REAL project workspace from a template: writes actual files
+  /// the agent can immediately inspect and modify. GitHub is NOT involved.
+  Future<String> createProjectFromTemplate(
+      String name, ProjectTemplate template) async {
+    final clean = _cleanProjectName(name);
+    final dir = await projectsDir();
+    final root = Directory(p.join(dir.path, clean));
+    if (root.existsSync()) {
+      throw ProjectException('A project named "$clean" already exists.');
+    }
+    root.createSync(recursive: true);
+    final safeName = clean.replaceAll('_', ' ');
+
+    for (final f in template.files) {
+      final out = resolveFileIn(root, f.path);
+      out.createSync(recursive: true);
+      out.writeAsStringSync(
+          f.content.replaceAll('__PROJECT_NAME__', safeName),
+          flush: true);
+    }
+    for (final d in template.dirs) {
+      Directory(p.join(root.path, d)).createSync(recursive: true);
+    }
+
+    _writeProjectMarker(root, clean, template);
     _root = root;
     _projectName = clean;
     await _persistLastProject();
@@ -208,6 +256,15 @@ class ProjectService {
     _root = root;
     _projectName = name;
     await _persistLastProject();
+  }
+
+  /// Resolve a path inside an ARBITRARY root (used by templates).
+  static File resolveFileIn(Directory root, String rel) {
+    final normalized = p.normalize(rel);
+    if (p.isAbsolute(normalized) || normalized.startsWith('..')) {
+      throw ProjectException('Path outside the project is not allowed: $rel');
+    }
+    return File(p.join(root.path, normalized));
   }
 
   /// Root of the open project; throws if none is open.
@@ -508,6 +565,433 @@ String? _safeJoin(String rootPath, String entryName) {
   final normalized = p.normalize(entryName);
   if (p.isAbsolute(normalized) || normalized.startsWith('..')) return null;
   return p.join(rootPath, normalized);
+}
+
+// =====================================================================
+// Project templates — real starter files, written to the workspace.
+// =====================================================================
+
+/// One starter file in a template.
+class TemplateFile {
+  final String path;
+  final String content;
+  const TemplateFile(this.path, this.content);
+}
+
+/// A project template: id, label, and the REAL files created on disk.
+/// Add new templates by appending to [all] — no other change needed.
+class ProjectTemplate {
+  final String id;
+  final String label;
+  final String description;
+  final IconData icon;
+  final List<String> dirs;
+  final List<TemplateFile> files;
+
+  const ProjectTemplate({
+    required this.id,
+    required this.label,
+    required this.description,
+    required this.icon,
+    this.dirs = const [],
+    this.files = const [],
+  });
+
+  static const blank = ProjectTemplate(
+    id: 'blank',
+    label: 'Blank Project',
+    description: 'Empty workspace — start from scratch',
+    icon: Icons.crop_square,
+  );
+
+  static const flutterApp = ProjectTemplate(
+    id: 'flutter_app',
+    label: 'Flutter App',
+    description: 'pubspec + lib/main.dart counter app',
+    icon: Icons.phone_android,
+    dirs: ['lib', 'lib/screens', 'test'],
+    files: [
+      TemplateFile('pubspec.yaml', '''name: __PROJECT_NAME__
+description: A Flutter project created with CodePilot.
+publish_to: "none"
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
+'''),
+      TemplateFile('lib/main.dart', '''import 'package:flutter/material.dart';
+
+void main() => runApp(const __PROJECT_NAME__App());
+
+class __PROJECT_NAME__App extends StatelessWidget {
+  const __PROJECT_NAME__App({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: '__PROJECT_NAME__',
+      theme: ThemeData(colorSchemeSeed: Colors.blue, useMaterial3: true),
+      home: const HomeScreen(),
+    );
+  }
+}
+
+class HomeScreen extends StatefulWidget {
+  const HomeScreen({super.key});
+
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  int _counter = 0;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('__PROJECT_NAME__')),
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Text('You have pushed the button this many times:'),
+            Text('$_counter', style: Theme.of(context).textTheme.headlineMedium),
+          ],
+        ),
+      ),
+      floatingActionButton: FloatingActionButton(
+        onPressed: () => setState(() => _counter++),
+        child: const Icon(Icons.add),
+      ),
+    );
+  }
+}
+'''),
+      TemplateFile('test/widget_test.dart', '''import 'package:flutter_test/flutter_test.dart';
+
+import 'package:__PROJECT_NAME__/main.dart';
+
+void main() {
+  testWidgets('counter starts at zero', (tester) async {
+    await tester.pumpWidget(const __PROJECT_NAME__App());
+    expect(find.text('0'), findsOneWidget);
+  });
+}
+'''),
+      TemplateFile('analysis_options.yaml',
+          'include: package:flutter_lints/flutter.yaml\n'),
+      TemplateFile(
+          '.gitignore', '.dart_tool/\nbuild/\n*.iml\n.idea/\nandroid/.gradle/\n'),
+    ],
+  );
+
+  static const flutterPackage = ProjectTemplate(
+    id: 'flutter_package',
+    label: 'Flutter Package',
+    description: 'Reusable Dart/Flutter library',
+    icon: Icons.category_outlined,
+    dirs: ['lib/src', 'test'],
+    files: [
+      TemplateFile('pubspec.yaml', '''name: __PROJECT_NAME__
+description: A reusable Flutter package created with CodePilot.
+version: 0.1.0
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+'''),
+      TemplateFile('lib/__PROJECT_NAME__.dart', '''/// __PROJECT_NAME__ — a reusable Flutter package.
+library;
+
+export 'src/core.dart';
+'''),
+      TemplateFile('lib/src/core.dart', '''/// Core API of the package.
+class Core {
+  const Core();
+
+  /// Returns a friendly greeting.
+  String greet(String name) => 'Hello, \$name!';
+}
+'''),
+      TemplateFile('test/core_test.dart', '''import 'package:flutter_test/flutter_test.dart';
+
+import 'package:__PROJECT_NAME__/__PROJECT_NAME__.dart';
+
+void main() {
+  test('greet', () {
+    expect(const Core().greet('World'), 'Hello, World!');
+  });
+}
+'''),
+    ],
+  );
+
+  static const androidProject = ProjectTemplate(
+    id: 'android',
+    label: 'Android Project',
+    description: 'Gradle + manifest skeleton',
+    icon: Icons.android,
+    dirs: ['app/src/main/java/com/example/app'],
+    files: [
+      TemplateFile('settings.gradle', '''pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+rootProject.name = "__PROJECT_NAME__"
+include ':app'
+'''),
+      TemplateFile('build.gradle', '''// Top-level build file.
+tasks.register('clean', Delete) {
+    delete rootProject.buildDir
+}
+'''),
+      TemplateFile('app/build.gradle', '''plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.example.app'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.example.app"
+        minSdk 24
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+    }
+}
+
+dependencies {
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+}
+'''),
+      TemplateFile('app/src/main/AndroidManifest.xml', '''<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application
+        android:label="__PROJECT_NAME__"
+        android:theme="@android:style/Theme.Material.Light">
+        <activity android:name=".MainActivity" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
+'''),
+    ],
+  );
+
+  static const webProject = ProjectTemplate(
+    id: 'web',
+    label: 'HTML/CSS/JavaScript',
+    description: 'Static web page — live-previewable in CodePilot',
+    icon: Icons.code,
+    dirs: ['assets'],
+    files: [
+      TemplateFile('index.html', '''<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>__PROJECT_NAME__</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="card">
+    <h1>__PROJECT_NAME__</h1>
+    <p>Edit this page or ask the CodePilot agent to build it out.</p>
+    <button id="cta">Tap me</button>
+  </main>
+  <script src="script.js"></script>
+</body>
+</html>
+'''),
+      TemplateFile('style.css', '''* { box-sizing: border-box; margin: 0; }
+body {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  font-family: system-ui, sans-serif;
+  background: #0b0f1a;
+  color: #e8ecf4;
+}
+.card {
+  padding: 2rem;
+  border-radius: 16px;
+  background: #131a2b;
+  border: 1px solid #233250;
+  text-align: center;
+}
+button {
+  margin-top: 1rem;
+  padding: 0.6rem 1.4rem;
+  border-radius: 999px;
+  border: 0;
+  background: #2f81f7;
+  color: white;
+  font-size: 1rem;
+}
+'''),
+      TemplateFile('script.js', '''document.getElementById('cta').addEventListener('click', () => {
+  document.querySelector('.card p').textContent =
+    'JavaScript works — build something great!';
+});
+'''),
+    ],
+  );
+
+  static const reactProject = ProjectTemplate(
+    id: 'react',
+    label: 'React Web App',
+    description: 'Vite + React scaffold',
+    icon: Icons.web,
+    dirs: ['src'],
+    files: [
+      TemplateFile('package.json', '''{
+  "name": "__PROJECT_NAME__",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "test": "echo add tests"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.1",
+    "vite": "^5.4.0"
+  }
+}
+'''),
+      TemplateFile('index.html', '''<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>__PROJECT_NAME__</title>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="module" src="/src/main.jsx"></script>
+</body>
+</html>
+'''),
+      TemplateFile('vite.config.js', '''import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
+
+export default defineConfig({ plugins: [react()] });
+'''),
+      TemplateFile('src/main.jsx', '''import React from 'react';
+import { createRoot } from 'react-dom/client';
+import App from './App.jsx';
+
+createRoot(document.getElementById('root')).render(<App />);
+'''),
+      TemplateFile('src/App.jsx', '''export default function App() {
+  return (
+    <main style={{ fontFamily: 'system-ui', padding: 32 }}>
+      <h1>__PROJECT_NAME__</h1>
+      <p>Edit src/App.jsx or ask the CodePilot agent.</p>
+    </main>
+  );
+}
+'''),
+    ],
+  );
+
+  static const nodeProject = ProjectTemplate(
+    id: 'node',
+    label: 'Node.js Project',
+    description: 'package.json + entry script',
+    icon: Icons.terminal,
+    dirs: ['src', 'test'],
+    files: [
+      TemplateFile('package.json', '''{
+  "name": "__PROJECT_NAME__",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test test/"
+  }
+}
+'''),
+      TemplateFile('src/index.js', '''// __PROJECT_NAME__ entry point.
+console.log('__PROJECT_NAME__ is running.');
+'''),
+      TemplateFile('test/smoke.test.js', '''import test from 'node:test';
+import assert from 'node:assert';
+
+test('smoke', () => {
+  assert.equal(1 + 1, 2);
+});
+'''),
+    ],
+  );
+
+  static const pythonProject = ProjectTemplate(
+    id: 'python',
+    label: 'Python Project',
+    description: 'Main script + tests + requirements',
+    icon: Icons.data_object,
+    dirs: ['src', 'tests'],
+    files: [
+      TemplateFile('requirements.txt', '# Add dependencies here\n'),
+      TemplateFile('src/main.py', '''"""__PROJECT_NAME__ — entry point."""
+
+
+def main() -> None:
+    print("__PROJECT_NAME__ is running.")
+
+
+if __name__ == "__main__":
+    main()
+'''),
+      TemplateFile('tests/test_main.py', '''"""Smoke tests."""
+
+
+def test_placeholder():
+    assert True
+'''),
+      TemplateFile(
+          '.gitignore', '__pycache__/\n.venv/\n*.pyc\n.pytest_cache/\n'),
+    ],
+  );
+
+  static const all = [
+    blank,
+    flutterApp,
+    flutterPackage,
+    androidProject,
+    webProject,
+    reactProject,
+    nodeProject,
+    pythonProject,
+  ];
+
+  static ProjectTemplate byId(String id) =>
+      all.firstWhere((t) => t.id == id, orElse: () => blank);
 }
 
 /// Serialize settings without ever touching the key (utility).

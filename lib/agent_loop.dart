@@ -6,6 +6,29 @@ import 'models.dart';
 import 'project_service.dart';
 import 'tool_registry.dart';
 
+/// Explicit lifecycle of one agent task. Every task reaches EXACTLY ONE
+/// final state; the UI must never stay in [running] indefinitely.
+enum AgentTaskState { idle, running, stopping, completed, failed, cancelled }
+
+extension AgentTaskStateX on AgentTaskState {
+  bool get isFinal =>
+      this == AgentTaskState.completed ||
+      this == AgentTaskState.failed ||
+      this == AgentTaskState.cancelled;
+}
+
+/// The single, authoritative end-of-task record. Emitted exactly once.
+class AgentOutcome {
+  final AgentTaskState state; // always final
+  final String message; // human-readable summary / error
+  final String? detail; // technical detail (e.g. exception string)
+
+  const AgentOutcome(this.state, this.message, {this.detail});
+
+  @override
+  String toString() => detail == null ? message : '$message ($detail)';
+}
+
 /// Events emitted while the agent loop runs. The UI renders these as the
 /// live activity panel; every event corresponds to a real tool execution.
 sealed class AgentEvent {
@@ -32,15 +55,20 @@ class AgentApprovalNeeded {
   AgentApprovalNeeded(this.tool, this.args);
 }
 
-class AgentFailed {
-  final String message;
-  AgentFailed(this.message);
-}
-
 /// The autonomous agent loop.
 ///
 /// USER PROMPT → [context build] → LLM with tools → execute tool calls →
 /// feed results back → repeat (up to [maxRounds]) → final answer.
+///
+/// Lifecycle guarantees:
+/// - [outcome] is a broadcast stream that emits EXACTLY ONE [AgentOutcome],
+///   always in a final state (completed / failed / cancelled). Late duplicate
+///   final events are impossible by construction ([_finalize] runs once).
+/// - A watchdog timer bounds the whole task ([taskTimeout]); timeouts
+///   finalize as FAILED unless the task already finished.
+/// - [cancel] flips to STOPPING immediately: in-flight LLM requests are
+///   aborted through the [CancelToken], no new tools start, pending
+///   approvals resolve, and the run finalizes as CANCELLED.
 ///
 /// Approval modes:
 /// - planOnly: one LLM round, tools provided but the executor REJECTS every
@@ -57,27 +85,47 @@ class AgentLoop {
   final AgentMode mode;
   final int maxRounds;
 
+  /// Hard ceiling for the WHOLE task (all rounds + tools). The default is
+  /// generous but finite — no task may run forever.
+  final Duration taskTimeout;
+
   AgentLoop({
     required this.backend,
     required this.registry,
     required this.projects,
     this.mode = AgentMode.auto,
     this.maxRounds = 10,
+    this.taskTimeout = const Duration(minutes: 6),
   });
 
   final _events = StreamController<AgentEvent>.broadcast();
   final _thoughts = StreamController<AgentThought>.broadcast();
   final _approvals = StreamController<AgentApprovalNeeded>.broadcast();
-  final _failures = StreamController<AgentFailed>.broadcast();
+  final _outcomeCtrl = StreamController<AgentOutcome>.broadcast();
 
   Stream<AgentEvent> get events => _events.stream;
   Stream<AgentThought> get thoughts => _thoughts.stream;
   Stream<AgentApprovalNeeded> get approvals => _approvals.stream;
-  Stream<AgentFailed> get failures => _failures.stream;
+
+  /// Emits exactly one final [AgentOutcome] per run.
+  Stream<AgentOutcome> get outcome => _outcomeCtrl.stream;
+
+  AgentTaskState _state = AgentTaskState.idle;
+  AgentTaskState get state => _state;
 
   bool _cancelled = false;
+  CancelToken? _cancelToken; // aborts the in-flight LLM request
+  Timer? _watchdog;
+  Completer<void>? _drained; // resolved when the run() future settles
+
+  /// Begin stopping: flip state, abort HTTP, refuse new work. Safe to call
+  /// multiple times and from any thread of execution.
   void cancel() {
+    if (_state.isFinal || _state == AgentTaskState.stopping) return;
     _cancelled = true;
+    if (_state == AgentTaskState.running) _state = AgentTaskState.stopping;
+    // Abort the in-flight LLM request immediately (socket close).
+    _cancelToken?.cancel();
     // A user cancelling while an approval dialog is up must not leave the
     // loop (or the registry gate) hanging forever.
     for (final c in _pendingApprovals.values) {
@@ -100,8 +148,45 @@ class AgentLoop {
   };
 
   /// Run the agent for [userRequest]. Returns the final assistant text.
-  Future<String> run(String userRequest, {List<ChatMessage>? priorHistory}) async {
+  ///
+  /// The returned future ALWAYS completes (never hangs): every code path is
+  /// wrapped by the watchdog, and the catch-all converts unexpected errors
+  /// into a FAILED outcome. Exactly one outcome is emitted.
+  Future<String> run(String userRequest, {List<ChatMessage>? priorHistory}) {
+    if (_state == AgentTaskState.running || _state == AgentTaskState.stopping) {
+      throw StateError('AgentLoop.run called while already running — '
+          'create a new AgentLoop per task.');
+    }
+    _state = AgentTaskState.running;
     _cancelled = false;
+
+    // Watchdog: bounds the entire task. If it fires, finalize as FAILED
+    // (unless already final) and abort any in-flight request.
+    _watchdog = Timer(taskTimeout, () {
+      if (_state.isFinal) return;
+      _cancelToken?.cancel();
+      for (final c in _pendingApprovals.values) {
+        if (!c.isCompleted) c.complete(false);
+      }
+      _pendingApprovals.clear();
+      _finalize(AgentOutcome(
+        AgentTaskState.failed,
+        'Task timed out after ${taskTimeout.inMinutes} minutes.',
+        detail: 'deadline_exceeded: the agent watchdog stopped the task so '
+            'the UI can never hang on a running spinner.',
+      ));
+    });
+
+    return _runInner(userRequest, priorHistory).whenComplete(() {
+      _watchdog?.cancel();
+      _watchdog = null;
+      _drained?.complete();
+      _drained = null;
+    });
+  }
+
+  Future<String> _runInner(
+      String userRequest, List<ChatMessage>? priorHistory) async {
     final hasProject = projects.projectName != null;
     final messages = <ChatMessage>[
       ChatMessage(role: 'system', content: _systemPrompt(hasProject)),
@@ -110,76 +195,147 @@ class AgentLoop {
       ChatMessage(role: 'user', content: _userTurn(userRequest)),
     ];
 
-    // Approval handling lives in the loop (_executeStep): the registry stays
-    // gate-free so there is no register/resolve race between the UI dialog
-    // and a gate completer.
-
     String finalText = '';
-    for (var round = 0; round < maxRounds; round++) {
-      if (_cancelled) return finalText;
-
-      final ({String content, List<ToolCall> toolCalls}) resp;
-      try {
-        resp = await backend
-            .chatWithTools(messages, tools: registry.schemas());
-      } on ApiException catch (e) {
-        _failures.add(AgentFailed(e.message));
-        rethrow;
-      }
-
-      if (_cancelled) return finalText;
-
-      if (resp.content.trim().isNotEmpty) {
-        _thoughts.add(AgentThought(resp.content.trim()));
-        finalText = resp.content.trim();
-      }
-
-      if (resp.toolCalls.isEmpty) {
-        return finalText; // model is done — no more tools requested
-      }
-
-      // Echo the assistant tool_calls turn, then append tool results.
-      messages.add(ChatMessage(
-        role: 'assistant',
-        content: resp.content,
-        toolCalls: [
-          for (final c in resp.toolCalls)
-            {
-              'id': c.id,
-              'type': 'function',
-              'function': {
-                'name': c.name,
-                'arguments': jsonEncode(c.arguments),
-              },
-            },
-        ],
-      ));
-
-      for (final call in resp.toolCalls) {
-        if (_cancelled) return finalText;
-        final result = await _executeStep(call);
-        messages.add(ChatMessage(
-          role: 'tool',
-          content: result,
-          toolCallId: call.id,
-        ));
-      }
-    }
-
-    // Ran out of rounds — one final no-tools call to force a wrap-up.
     try {
-      final wrap = await backend.chatWithTools([
-        ...messages,
-        ChatMessage(
-            role: 'user',
-            content:
-                'You have reached the step limit. Summarize the outcome now: '
-                'what changed, what was verified, what remains.'),
-      ]);
-      return wrap.content.trim().isEmpty ? finalText : wrap.content.trim();
-    } on ApiException {
+      for (var round = 0; round < maxRounds; round++) {
+        if (_cancelled) {
+          _finalize(const AgentOutcome(AgentTaskState.cancelled,
+              'Task cancelled — stopped by the user.'));
+          return finalText;
+        }
+
+        final ({String content, List<ToolCall> toolCalls}) resp;
+        try {
+          _cancelToken = CancelToken();
+          // retries: 1 — a provider timeout should fail the task promptly
+          // instead of silently retrying for many minutes.
+          resp = await backend.chatWithTools(
+            messages,
+            tools: registry.schemas(),
+            cancelToken: _cancelToken,
+            retries: 1,
+          );
+        } on ApiException catch (e) {
+          if (_cancelled || e.kind == 'cancelled') {
+            _finalize(const AgentOutcome(AgentTaskState.cancelled,
+                'Task cancelled — stopped by the user.'));
+            return finalText;
+          }
+          _finalize(AgentOutcome(AgentTaskState.failed, e.message,
+              detail: e.kind));
+          return finalText;
+        } catch (e) {
+          _finalize(
+              AgentOutcome(AgentTaskState.failed, 'Agent failed: $e'));
+          return finalText;
+        } finally {
+          _cancelToken = null;
+        }
+
+        if (_cancelled) {
+          _finalize(const AgentOutcome(AgentTaskState.cancelled,
+              'Task cancelled — stopped by the user.'));
+          return finalText;
+        }
+
+        if (resp.content.trim().isNotEmpty) {
+          _thoughts.add(AgentThought(resp.content.trim()));
+          finalText = resp.content.trim();
+        }
+
+        if (resp.toolCalls.isEmpty) {
+          // Model is done — no more tools requested.
+          _finalize(AgentOutcome(AgentTaskState.completed,
+              finalText.isEmpty ? 'Task completed.' : finalText));
+          return finalText;
+        }
+
+        // Echo the assistant tool_calls turn, then append tool results.
+        messages.add(ChatMessage(
+          role: 'assistant',
+          content: resp.content,
+          toolCalls: [
+            for (final c in resp.toolCalls)
+              {
+                'id': c.id,
+                'type': 'function',
+                'function': {
+                  'name': c.name,
+                  'arguments': jsonEncode(c.arguments),
+                },
+              },
+          ],
+        ));
+
+        for (final call in resp.toolCalls) {
+          if (_cancelled) {
+            _finalize(const AgentOutcome(AgentTaskState.cancelled,
+                'Task cancelled — stopped by the user.'));
+            return finalText;
+          }
+          final result = await _executeStep(call);
+          if (_state.isFinal) return finalText; // watchdog/cancel mid-step
+          messages.add(ChatMessage(
+            role: 'tool',
+            content: result,
+            toolCallId: call.id,
+          ));
+        }
+      }
+
+      // Ran out of rounds — one final no-tools call to force a wrap-up.
+      try {
+        _cancelToken = CancelToken();
+        final wrap = await backend.chatWithTools([
+          ...messages,
+          ChatMessage(
+              role: 'user',
+              content:
+                  'You have reached the step limit. Summarize the outcome now: '
+                  'what changed, what was verified, what remains.'),
+        ], cancelToken: _cancelToken, retries: 1);
+        finalText = wrap.content.trim().isEmpty ? finalText : wrap.content.trim();
+      } on ApiException catch (e) {
+        if (!_cancelled && e.kind != 'cancelled') {
+          // The work itself may be done; report the summary failure but the
+          // task outcome reflects the error honestly.
+          _finalize(AgentOutcome(AgentTaskState.failed,
+              'Task finished but the final summary request failed: ${e.message}',
+              detail: e.kind));
+          return finalText;
+        }
+      } catch (e) {
+        _finalize(
+            AgentOutcome(AgentTaskState.failed, 'Agent failed: $e'));
+        return finalText;
+      } finally {
+        _cancelToken = null;
+      }
+      _finalize(AgentOutcome(AgentTaskState.completed,
+          finalText.isEmpty ? 'Task completed.' : finalText));
+      return finalText;
+    } catch (e) {
+      // Last-resort guard: nothing may escape without a final outcome.
+      _finalize(AgentOutcome(AgentTaskState.failed, 'Agent failed: $e'));
       return finalText;
     }
+  }
+
+  /// Finalize-once: only the FIRST call wins; every later call is ignored.
+  /// This is the single point where duplicate completion/failure/cancel
+  /// events are collapsed.
+  void _finalize(AgentOutcome o) {
+    if (_state.isFinal) return; // late duplicates are dropped
+    _watchdog?.cancel();
+    _watchdog = null;
+    _state = o.state;
+    _cancelToken?.cancel();
+    _cancelToken = null;
+    for (final c in _pendingApprovals.values) {
+      if (!c.isCompleted) c.complete(false);
+    }
+    _pendingApprovals.clear();
+    _outcomeCtrl.add(o);
   }
 
   Future<String> _executeStep(ToolCall call) async {
@@ -191,6 +347,14 @@ class AgentLoop {
       status: AgentStepStatus.running,
     );
     _events.add(StepStarted(step));
+
+    if (_cancelled) {
+      step
+        ..status = AgentStepStatus.failed
+        ..detail = 'Cancelled before execution.';
+      _events.add(StepFinished(step));
+      return 'CANCELLED';
+    }
 
     if (mode == AgentMode.planOnly && _mutating.contains(call.name)) {
       step
@@ -207,7 +371,13 @@ class AgentLoop {
     if (mode == AgentMode.askBeforeChanges && _mutating.contains(call.name)) {
       _approvals.add(AgentApprovalNeeded(call.name, call.arguments));
       final approved = await _gate(call.name, call.arguments);
-      if (_cancelled) return 'CANCELLED';
+      if (_cancelled) {
+        step
+          ..status = AgentStepStatus.failed
+          ..detail = 'Cancelled while awaiting approval.';
+        _events.add(StepFinished(step));
+        return 'CANCELLED';
+      }
       if (!approved) {
         step
           ..status = AgentStepStatus.failed
@@ -218,8 +388,13 @@ class AgentLoop {
       }
     }
 
-    final result = await registry.execute(call.name, call.arguments);
-    if (_cancelled) return result;
+    String result;
+    try {
+      result = await registry.execute(call.name, call.arguments);
+    } catch (e) {
+      result = 'ERROR: tool crashed: $e';
+    }
+    if (_state.isFinal) return result;
 
     if (const ['write_file', 'create_file', 'patch_file']
         .contains(call.name)) {
@@ -297,14 +472,15 @@ Working rules:
     }
     return '$base\nNO project is open: file and git tools will return an error. '
         'For coding questions answer directly; for project work, tell the user to '
-        'import a project (Home → File → ZIP, or Integrations → GitHub).';
+        'create a project (Home → menu → Projects → New Project) or import one '
+        '(Home → File → ZIP, or Integrations → GitHub).';
   }
 
   String _userTurn(String request) {
     final hasProject = projects.projectName != null;
     final head = hasProject
         ? 'PROJECT: ${projects.projectName} (${projects.detectType()})\n'
-        : 'PROJECT: none imported\n';
+        : 'PROJECT: none open\n';
     return '$head\nTASK: $request';
   }
 }

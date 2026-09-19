@@ -53,9 +53,14 @@ class _ChatScreenState extends State<ChatScreen> {
   AgentLoop? _activeLoop;
   final List<AgentStep> _agentSteps = [];
   String? _agentThought;
+  /// Explicit task lifecycle: the UI is driven by this + the loop's outcome
+  /// stream, never by an indefinite boolean spinner.
+  AgentTaskState _agentState = AgentTaskState.idle;
+  String? _agentError;
   StreamSubscription<AgentEvent>? _eventSub;
   StreamSubscription<AgentThought>? _thoughtSub;
   StreamSubscription<AgentApprovalNeeded>? _approvalSub;
+  StreamSubscription<AgentOutcome>? _outcomeSub;
 
   static String _approvalKey(String tool, Map<String, dynamic> args) =>
       '$tool:${args['path'] ?? args['name'] ?? ''}';
@@ -169,6 +174,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _eventSub?.cancel();
     _thoughtSub?.cancel();
     _approvalSub?.cancel();
+    _outcomeSub?.cancel();
     _input.dispose();
     _scroll.dispose();
     super.dispose();
@@ -476,6 +482,8 @@ class _ChatScreenState extends State<ChatScreen> {
         hasImage: image != null,
       ));
       _busy = true;
+      _agentState = AgentTaskState.running;
+      _agentError = null;
       _agentSteps.clear();
       _agentThought = null;
       _pendingImage = null;
@@ -531,42 +539,89 @@ class _ChatScreenState extends State<ChatScreen> {
       loop.resolveApproval(a.tool, _approvalKey(a.tool, a.args), approved);
     });
 
+    // The outcome stream is the SINGLE source of truth for the final state.
+    // It fires exactly once (completed / failed / cancelled); the completer
+    // below makes _agentSend wait for it even when loop.run() resolves
+    // first, so no path can leave the UI in RUNNING.
+    final outcomeDone = Completer<void>();
+    _outcomeSub = loop.outcome.listen((o) {
+      if (!outcomeDone.isCompleted) outcomeDone.complete();
+      if (!mounted) return;
+      setState(() {
+        _agentState = o.state;
+        if (o.state == AgentTaskState.failed) _agentError = o.message;
+        _agentThought = null;
+      });
+      if (o.state == AgentTaskState.completed) {
+        _push('assistant', o.message);
+      } else if (o.state == AgentTaskState.failed) {
+        _push('system', '✕ Task failed — ${o.message}', isError: true);
+      } else if (o.state == AgentTaskState.cancelled) {
+        _push('system', '⏹ Task cancelled.');
+      }
+      _scrollDown();
+    });
+
     try {
       final prior = _messages.length > 10
           ? _messages.sublist(_messages.length - 10)
           : _messages;
-      final reply = await loop.run(
+      // Belt-and-braces: even if a backend ignored cancellation, this
+      // timeout guarantees _agentSend terminates after the watchdog.
+      await loop.run(
         effectiveRequest,
         priorHistory: prior.sublist(0, prior.length - 1), // exclude this turn
-      );
-      if (!mounted) return;
-      setState(() {
-        _messages.add(ChatMessage(
-          role: 'assistant',
-          content: reply.isEmpty
-              ? '(agent finished without a summary)'
-              : reply,
-        ));
-        _agentThought = null;
+      ).timeout(loop.taskTimeout + const Duration(seconds: 15),
+          onTimeout: () => '');
+      // Wait for the outcome event so the final state and banner are applied
+      // in the same tick; the loop guarantees exactly one outcome.
+      await outcomeDone.future.timeout(const Duration(seconds: 2),
+          onTimeout: () {
+        // Defensive: an outcome should always arrive; if it somehow didn't,
+        // force a terminal state so the UI can never stay RUNNING/STOPPING.
+        if (mounted && !_agentState.isFinal) {
+          setState(() {
+            _agentState = _agentState == AgentTaskState.stopping
+                ? AgentTaskState.cancelled
+                : AgentTaskState.failed;
+            if (_agentState == AgentTaskState.failed) {
+              _agentError = 'The agent finished without reporting a result.';
+            }
+          });
+        }
       });
-      _scrollDown();
       await _saveSession();
-    } on ApiException catch (e) {
-      _push('system', e.message, isError: true);
+    } on StateError {
+      // loop.run() re-entry guard — cannot happen from this UI path.
+      _push('system', 'An agent task is already running.', isError: true);
     } catch (e) {
-      _push('system', 'Agent error: $e', isError: true);
+      if (mounted) {
+        setState(() {
+          _agentState = AgentTaskState.failed;
+          _agentError = '$e';
+        });
+        _push('system', '✕ Task failed — $e', isError: true);
+      }
     } finally {
       _eventSub?.cancel();
       _thoughtSub?.cancel();
       _approvalSub?.cancel();
+      _outcomeSub?.cancel();
       _eventSub = null;
       _thoughtSub = null;
       _approvalSub = null;
+      _outcomeSub = null;
       _activeLoop = null;
       if (mounted) {
         setState(() {
           _busy = false;
           _agentThought = null;
+          // Absolute last resort: no path may leave a non-final state here.
+          if (!_agentState.isFinal) {
+            _agentState = _agentState == AgentTaskState.stopping
+                ? AgentTaskState.cancelled
+                : AgentTaskState.failed;
+          }
         });
       }
       _scrollDown();
@@ -602,7 +657,11 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _cancelAgent() {
-    _activeLoop?.cancel();
+    final loop = _activeLoop;
+    if (loop == null) return;
+    // Immediate UI feedback: STOPPING disables Stop and shows the banner.
+    if (mounted) setState(() => _agentState = AgentTaskState.stopping);
+    loop.cancel();
   }
 
   void _cycleApprovalMode() {
@@ -714,14 +773,21 @@ class _ChatScreenState extends State<ChatScreen> {
                     : 'Agent mode is ON. Examples:\n• "Find and fix the deprecated API in the search screen, then commit"\n• "Add a dark-mode toggle to settings and open a PR"\n• Tap AUTO to switch approval modes · ✦ for plain chat.',
                     style: TextStyle(color: AppTheme.muted)),
               for (final m in _messages) _bubble(m),
-              if (_agentSteps.isNotEmpty)
+              if (_agentSteps.isNotEmpty || _agentState != AgentTaskState.idle)
                 AgentActivityPanel(
                   steps: _agentSteps,
+                  state: _agentState,
                   currentThought: _agentThought,
-                  onCancel: _busy ? _cancelAgent : null,
+                  errorMessage: _agentError,
+                  onCancel: _agentState == AgentTaskState.running
+                      ? _cancelAgent
+                      : null,
                 ),
               if (_streamBuf != null) _bubble(ChatMessage(role: 'assistant', content: '$_streamBuf▍')),
-              if (_busy && _streamBuf == null && _agentSteps.isEmpty)
+              if (_busy &&
+                  _streamBuf == null &&
+                  _agentSteps.isEmpty &&
+                  _agentState == AgentTaskState.idle)
                 const Padding(padding: EdgeInsets.all(8), child: Center(child: CircularProgressIndicator())),
               for (var i = 0; i < _pending.length; i++) _pendingCard(i),
             ],

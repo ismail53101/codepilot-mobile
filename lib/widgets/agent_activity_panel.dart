@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../agent_loop.dart';
 import '../models.dart';
 import '../theme.dart';
 
@@ -7,21 +8,35 @@ import '../theme.dart';
 /// ● running · ✓ done · ✗ failed — tap to expand and see the tool, its
 /// arguments, and the real output. Nothing here is fabricated: rows appear
 /// only when AgentLoop emits events from actual executions.
+///
+/// [state] drives the header: the spinner shows ONLY while the task is
+/// running/stopping; COMPLETED / FAILED / CANCELLED each render a final
+/// banner and stop all motion. The Stop button is active only while work
+/// is actually cancellable.
 class AgentActivityPanel extends StatelessWidget {
   final List<AgentStep> steps;
   final String? currentThought;
+  final AgentTaskState state;
+  final String? errorMessage;
   final VoidCallback? onCancel;
 
   const AgentActivityPanel({
     super.key,
     required this.steps,
+    required this.state,
     this.currentThought,
+    this.errorMessage,
     this.onCancel,
   });
 
+  bool get _isRunning => state == AgentTaskState.running;
+  bool get _isStopping => state == AgentTaskState.stopping;
+
   @override
   Widget build(BuildContext context) {
-    if (steps.isEmpty && currentThought == null) return const SizedBox.shrink();
+    if (steps.isEmpty && currentThought == null && state == AgentTaskState.idle) {
+      return const SizedBox.shrink();
+    }
     return Container(
       margin: const EdgeInsets.symmetric(vertical: 4),
       decoration: BoxDecoration(
@@ -35,25 +50,40 @@ class AgentActivityPanel extends StatelessWidget {
           Padding(
             padding: const EdgeInsets.fromLTRB(12, 10, 8, 6),
             child: Row(children: [
-              SizedBox(
-                width: 12,
-                height: 12,
-                child: CircularProgressIndicator(
-                  strokeWidth: 2,
-                  color: AppTheme.glowAccent,
-                ),
-              ),
+              // Spinner ONLY while there is real work in flight.
+              if (_isRunning)
+                const SizedBox(
+                  width: 12,
+                  height: 12,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: AppTheme.glowAccent,
+                  ),
+                )
+              else if (_isStopping)
+                const SizedBox(
+                  width: 12,
+                  height: 12,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: AppTheme.warn,
+                  ),
+                )
+              else
+                Icon(_finalIcon, size: 14, color: _finalColor),
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
-                  currentThought == null ? 'Working…' : _firstLine(currentThought!),
+                  _headerText,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                      color: AppTheme.text, fontSize: 13, fontWeight: FontWeight.w600),
+                  style: TextStyle(
+                      color: _headerColor,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600),
                 ),
               ),
-              if (onCancel != null)
+              if (_isRunning && onCancel != null)
                 TextButton(
                   onPressed: onCancel,
                   style: TextButton.styleFrom(
@@ -61,15 +91,61 @@ class AgentActivityPanel extends StatelessWidget {
                     foregroundColor: AppTheme.err,
                   ),
                   child: const Text('Stop'),
+                )
+              else if (_isStopping)
+                const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 8),
+                  child: Text('Stopping…',
+                      style: TextStyle(color: AppTheme.muted, fontSize: 12)),
                 ),
             ]),
           ),
+          if (state == AgentTaskState.failed && errorMessage != null)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
+              child: SelectableText(
+                '✕ $errorMessage',
+                style: const TextStyle(color: AppTheme.err, fontSize: 12, height: 1.4),
+              ),
+            ),
           for (final s in steps) _StepRow(step: s),
           const SizedBox(height: 4),
         ],
       ),
     );
   }
+
+  IconData get _finalIcon => switch (state) {
+        AgentTaskState.completed => Icons.check_circle,
+        AgentTaskState.failed => Icons.cancel,
+        AgentTaskState.cancelled => Icons.stop_circle,
+        _ => Icons.circle,
+      };
+
+  Color get _finalColor => switch (state) {
+        AgentTaskState.completed => AppTheme.ok,
+        AgentTaskState.failed => AppTheme.err,
+        AgentTaskState.cancelled => AppTheme.warn,
+        _ => AppTheme.muted,
+      };
+
+  String get _headerText => switch (state) {
+        AgentTaskState.idle => 'Working…',
+        AgentTaskState.running => currentThought == null
+            ? 'Working…'
+            : _firstLine(currentThought!),
+        AgentTaskState.stopping => 'Stopping…',
+        AgentTaskState.completed => '✓ Task completed',
+        AgentTaskState.failed => '✕ Task failed',
+        AgentTaskState.cancelled => '⏹ Task cancelled',
+      };
+
+  Color get _headerColor => switch (state) {
+        AgentTaskState.completed => AppTheme.ok,
+        AgentTaskState.failed => AppTheme.err,
+        AgentTaskState.cancelled => AppTheme.warn,
+        _ => AppTheme.text,
+      };
 
   static String _firstLine(String s) {
     final t = s.trim().replaceAll('\n', ' ');
