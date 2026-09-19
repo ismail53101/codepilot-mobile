@@ -31,7 +31,7 @@ class CodePilotHeader extends StatelessWidget {
             fit: BoxFit.scaleDown,
             alignment: Alignment.centerLeft,
             child: Text.rich(
-              TextSpan(
+              const TextSpan(
                 children: [
                   TextSpan(
                     text: 'Code',
