@@ -97,6 +97,7 @@ class ApiClient implements ChatBackend {
   /// Non-streaming completion that also returns OpenAI tool_calls so the
   /// agent loop can execute tools. Falls back gracefully when the provider
   /// omits tool support (content-only response).
+  @override
   Future<({String content, List<ToolCall> toolCalls})> chatWithTools(
       List<ChatMessage> messages,
       {List<Map<String, dynamic>>? tools,

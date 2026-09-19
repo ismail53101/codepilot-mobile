@@ -278,7 +278,7 @@ class AgentLoop {
   // ------------------------------------------------------------------
 
   String _systemPrompt(bool hasProject) {
-    final base = '''
+    const base = '''
 You are CodePilot, an AUTONOMOUS coding agent running on the user's Android device.
 You accomplish tasks by CALLING TOOLS, not by printing code for the user to apply.
 
