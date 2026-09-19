@@ -1173,7 +1173,6 @@ class _CodeBlock extends StatelessWidget {
                 tooltip: 'Preview project (index.html)',
                 icon: const Icon(Icons.open_in_new, size: 16, color: AppTheme.glowAccent),
                 onPressed: () {
-                  final root = projectService.rootPath!;
                   final candidates = [
                     'index.html',
                     'src/index.html',
