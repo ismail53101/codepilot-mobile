@@ -66,7 +66,7 @@ class CodePilotHeader extends StatelessWidget {
                   FittedBox(
                     fit: BoxFit.scaleDown,
                     child: Text('Create Project',
-                        style: const TextStyle(
+                        style: TextStyle(
                             color: AppTheme.text,
                             fontSize: 15,
                             fontWeight: FontWeight.w600)),
