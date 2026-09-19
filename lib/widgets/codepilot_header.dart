@@ -59,14 +59,14 @@ class CodePilotHeader extends StatelessWidget {
               behavior: HitTestBehavior.opaque,
               child: Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                child: Row(mainAxisSize: MainAxisSize.min, children: [
-                  const Icon(Icons.add_circle_outline,
+                child: Row(mainAxisSize: MainAxisSize.min, children: const [
+                  Icon(Icons.add_circle_outline,
                       size: 18, color: AppTheme.text),
-                  const SizedBox(width: 6),
+                  SizedBox(width: 6),
                   FittedBox(
                     fit: BoxFit.scaleDown,
-                    child: const Text('Create Project',
-                        style: TextStyle(
+                    child: Text('Create Project',
+                        style: const TextStyle(
                             color: AppTheme.text,
                             fontSize: 15,
                             fontWeight: FontWeight.w600)),
