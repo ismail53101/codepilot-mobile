@@ -299,14 +299,14 @@ class ProjectService {
 
   /// Direct children (one level) of a directory, relative paths.
   List<FileNode> listDir(String rel) {
-    final resolved = resolveFile(rel);
-    if (!resolved.existsSync()) {
+    final dir = Directory(p.join(root.path, p.normalize(rel)));
+    final rootPath = p.normalize(root.path);
+    if (!p.isWithin(rootPath, p.normalize(dir.path))) {
+      throw ProjectException('Path outside the project is not allowed: $rel');
+    }
+    if (!dir.existsSync()) {
       throw ProjectException('Directory not found: $rel');
     }
-    if (resolved is! Directory) {
-      throw ProjectException('Not a directory: $rel');
-    }
-    final dir = resolved;
     final out = <FileNode>[];
     for (final e in dir.listSync()) {
       final r = p.relative(e.path, from: root.path).replaceAll('\\', '/');
@@ -440,7 +440,7 @@ class ProjectService {
       }
     }
     if (branch == null) return null;
-    return (branch: branch, head: head!);
+    return (branch: branch, head: head == null || head.isEmpty ? 'unknown' : head);
   }
 
   /// Unified line diff between two strings.
