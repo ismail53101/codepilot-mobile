@@ -280,7 +280,10 @@ void main() {
         registry: _registry(ProjectService()),
         projects: ProjectService(),
       );
+      // Start the run first, then await its single outcome.
+      final runFuture = loop.run('hello');
       final outcome = await loop.outcome.first;
+      await runFuture;
       expect(loop.state, AgentTaskState.failed);
       expect(outcome.state, AgentTaskState.failed);
       expect(outcome.message, contains('boom'));
@@ -294,7 +297,10 @@ void main() {
         projects: ProjectService(),
         taskTimeout: const Duration(milliseconds: 80),
       );
+      // run() arms the watchdog; the hanging backend is aborted when it fires.
+      final runFuture = loop.run('hang');
       final outcome = await loop.outcome.first;
+      await runFuture;
       expect(loop.state, AgentTaskState.failed);
       expect(outcome.state, AgentTaskState.failed);
       expect(outcome.message, contains('timed out'));
