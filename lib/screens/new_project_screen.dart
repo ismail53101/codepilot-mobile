@@ -87,7 +87,7 @@ class _NewProjectScreenState extends State<NewProjectScreen> {
                   ),
                 ),
                 const SizedBox(height: 20),
-                Text('Template',
+                const Text('Template',
                     style: TextStyle(
                         color: AppTheme.muted,
                         fontSize: 12,
