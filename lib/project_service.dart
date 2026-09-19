@@ -423,9 +423,15 @@ class ProjectService {
     if (headFile.existsSync()) {
       final raw = headFile.readAsStringSync().trim();
       final m = RegExp(r'ref: refs/heads/(.+)').firstMatch(raw);
-      branch = m?.group(1) ?? raw.substring(0, raw.length.clamp(0, 12));
-      final refFile = File(p.join(gitDir.path, 'refs', 'heads', branch ?? ''));
-      if (refFile.existsSync()) head = refFile.readAsStringSync().trim();
+      branch = m?.group(1);
+      if (branch == null) {
+        // Detached HEAD: the raw value is the commit sha itself.
+        branch = raw.substring(0, raw.length.clamp(0, 12));
+        head = raw;
+      } else {
+        final refFile = File(p.join(gitDir.path, 'refs', 'heads', branch));
+        if (refFile.existsSync()) head = refFile.readAsStringSync().trim();
+      }
     }
     if (head == null || head.isEmpty) {
       // Packed refs fallback (clone created by this app may pack refs).
