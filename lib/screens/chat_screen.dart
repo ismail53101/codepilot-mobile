@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:share_plus/share_plus.dart';
 
 import '../agent_loop.dart';
 import '../agent_service.dart';
@@ -57,6 +58,10 @@ class _ChatScreenState extends State<ChatScreen> {
   /// stream, never by an indefinite boolean spinner.
   AgentTaskState _agentState = AgentTaskState.idle;
   String? _agentError;
+  /// Text of the last agent task — powers the one-tap Retry on failure.
+  String? _lastAgentRequest;
+  /// Most recent saved conversations (for the resume card on fresh chats).
+  List<ChatSession> _recentSessions = const [];
   StreamSubscription<AgentEvent>? _eventSub;
   StreamSubscription<AgentThought>? _thoughtSub;
   StreamSubscription<AgentApprovalNeeded>? _approvalSub;
@@ -172,6 +177,17 @@ class _ChatScreenState extends State<ChatScreen> {
     // approval wait — no background polling, no orphaned completers.
     // Persist the thread FIRST so backing out mid-run never loses the task
     // text (the post-run save can no longer happen once unmounted).
+    if (_agentState == AgentTaskState.running ||
+        _agentState == AgentTaskState.stopping) {
+      // Mark the thread honestly: the agent was cancelled because the user
+      // left the screen. Without this the reopened chat would show the task
+      // text with no explanation of what happened to it.
+      _messages.add(const ChatMessage(
+        role: 'system',
+        content: '⏹ Task stopped — you left this screen while the agent was '
+            'working. Send the task again (or use Retry) to continue.',
+      ));
+    }
     if (_messages.isNotEmpty) {
       unawaited(_saveSession());
     }
@@ -217,12 +233,15 @@ class _ChatScreenState extends State<ChatScreen> {
     if (fresh) {
       // Entering from Home: ALWAYS a brand-new conversation, like other
       // chatbots. A previously resumed thread is not lost — it stays in
-      // the Chats history.
+      // the Chats history and is offered via the resume card below.
+      final sessions = await chatSessionStore.load();
+      if (!mounted) return;
       setState(() {
         _restored = true;
         _sessionId = null;
         _messages.clear();
         _pending.clear();
+        _recentSessions = sessions.take(3).toList();
       });
     } else if (!_restored) {
       final sessions = await chatSessionStore.load();
@@ -384,6 +403,32 @@ class _ChatScreenState extends State<ChatScreen> {
     _push('system', 'New chat. The previous conversation is saved under Chats.');
   }
 
+  /// Re-open the previous thread without losing the current one (it is
+  /// saved first). Used by the "Continue previous conversation" card.
+  Future<void> _resumePrevious() async {
+    if (_recentSessions.isEmpty) return;
+    await _saveSession(); // keep the current thread if it has content
+    final chosen = _recentSessions.first;
+    if (!mounted) return;
+    setState(() {
+      _sessionId = chosen.id;
+      _messages
+        ..clear()
+        ..addAll(chosen.messages);
+      _pending.clear();
+      _recentSessions = const [];
+    });
+    _scrollDown();
+  }
+
+  /// One-tap retry of the last agent task after a failure or stop.
+  void _retryLast() {
+    final text = _lastAgentRequest;
+    if (text == null || _busy) return;
+    if (!_agentMode) setState(() => _agentMode = true);
+    _agentSend(text);
+  }
+
   Future<void> _send() async {
     final text = _input.text.trim();
     if (text.isEmpty || _busy) return;
@@ -463,11 +508,16 @@ class _ChatScreenState extends State<ChatScreen> {
       _scrollDown();
       await _saveSession();
     } on ApiException catch (e) {
-      _push('system', e.message, isError: true);
+      // Keep the text in the composer so one tap on send retries the
+      // request (conversation-level retry).
+      if (mounted) _input.text = text;
+      _push('system', '${e.message}\nTap send to retry.', isError: true);
     } on ProjectException catch (e) {
-      _push('system', e.message, isError: true);
+      if (mounted) _input.text = text;
+      _push('system', '${e.message}\nTap send to retry.', isError: true);
     } catch (e) {
-      _push('system', 'Unexpected error: $e', isError: true);
+      if (mounted) _input.text = text;
+      _push('system', 'Unexpected error: $e\nTap send to retry.', isError: true);
     } finally {
       if (mounted) setState(() => _busy = false);
       _scrollDown();
@@ -496,8 +546,10 @@ class _ChatScreenState extends State<ChatScreen> {
       _busy = true;
       _agentState = AgentTaskState.running;
       _agentError = null;
+      _lastAgentRequest = text;
       _agentSteps.clear();
       _agentThought = null;
+      _recentSessions = const [];
       _pendingImage = null;
       _pendingImageName = null;
     });
@@ -738,6 +790,28 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  /// Export the open project and hand the ZIP to the Android share sheet
+  /// (user picks Save to Files / Drive / Send to…).
+  Future<void> _downloadZip() async {
+    if (projectService.projectName == null) return;
+    _push('system', 'Packing ${projectService.projectName}…');
+    try {
+      final path = await projectService.exportZip();
+      if (!mounted) return;
+      final box = context.findRenderObject() as RenderBox?;
+      await Share.shareXFiles(
+        [XFile(path)],
+        subject: '${projectService.projectName} — CodePilot export',
+        sharePositionOrigin: box == null
+            ? null
+            : box.localToGlobal(Offset.zero) & box.size,
+      );
+      _push('system', '✓ Project packed — choose where to save it in the share sheet.');
+    } catch (e) {
+      _push('system', 'Could not create the ZIP: $e', isError: true);
+    }
+  }
+
   Future<void> _publishToGitHub() async {
     final repo = await githubProjectStore.load();
     if (repo == null) {
@@ -758,6 +832,12 @@ class _ChatScreenState extends State<ChatScreen> {
       appBar: AppBar(title: Text('Chat · ${projectService.projectName ?? 'general'}'), actions: [
         IconButton(icon: const Icon(Icons.chat_bubble_outline), tooltip: 'Chats (history)', onPressed: _openChatHistory),
         IconButton(icon: const Icon(Icons.add_comment_outlined), tooltip: 'New chat', onPressed: _busy ? null : _newChat),
+        if (projectService.projectName != null)
+          IconButton(
+            icon: const Icon(Icons.download_outlined),
+            tooltip: 'Download project as ZIP',
+            onPressed: _downloadZip,
+          ),
         IconButton(icon: const Icon(Icons.cloud_upload), tooltip: 'Publish confirmed changes to GitHub', onPressed: _publishToGitHub),
         IconButton(icon: const Icon(Icons.undo), tooltip: 'Undo latest change', onPressed: () {
           final rec = agentService.undoLast();
@@ -797,6 +877,12 @@ class _ChatScreenState extends State<ChatScreen> {
                     ? 'Agent mode is ON: give a task like "Fix the login screen and commit".\n\nNo project is open yet — import one with Home → File (ZIP) or Integrations → GitHub.\n\nTap AUTO to switch approval modes; tap ✦ to toggle plain chat.'
                     : 'Agent mode is ON. Examples:\n• "Find and fix the deprecated API in the search screen, then commit"\n• "Add a dark-mode toggle to settings and open a PR"\n• Tap AUTO to switch approval modes · ✦ for plain chat.',
                     style: TextStyle(color: AppTheme.muted)),
+              if (_messages.isEmpty && _recentSessions.isNotEmpty)
+                _ResumeCard(
+                  sessions: _recentSessions,
+                  onResume: _resumePrevious,
+                  onDismiss: () => setState(() => _recentSessions = const []),
+                ),
               for (final m in _messages) _bubble(m),
               if (_agentSteps.isNotEmpty || _agentState != AgentTaskState.idle)
                 AgentActivityPanel(
@@ -806,6 +892,10 @@ class _ChatScreenState extends State<ChatScreen> {
                   errorMessage: _agentError,
                   onCancel: _agentState == AgentTaskState.running
                       ? _cancelAgent
+                      : null,
+                  onRetry: (_agentState == AgentTaskState.failed ||
+                          _agentState == AgentTaskState.cancelled)
+                      ? _retryLast
                       : null,
                 ),
               if (_streamBuf != null) _bubble(ChatMessage(role: 'assistant', content: '$_streamBuf▍')),
@@ -1365,6 +1455,76 @@ class _SyntaxHighlight extends StatelessWidget {
       _span(),
       style: const TextStyle(
           fontFamily: 'monospace', fontSize: 12, height: 1.5, color: AppTheme.text),
+    );
+  }
+}
+
+/// On a fresh chat (entered from Home), offers to reopen the previous
+/// conversation instead of making the user dig through the history sheet —
+/// the standard chatbot continuity pattern.
+class _ResumeCard extends StatelessWidget {
+  final List<ChatSession> sessions;
+  final VoidCallback onResume;
+  final VoidCallback onDismiss;
+
+  const _ResumeCard({
+    required this.sessions,
+    required this.onResume,
+    required this.onDismiss,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final s = sessions.first;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.fromLTRB(12, 10, 8, 6),
+      decoration: BoxDecoration(
+        color: AppTheme.surface2,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppTheme.border),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          const Icon(Icons.history, size: 15, color: AppTheme.glowAccent),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              'Continue "${s.title}"',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                  color: AppTheme.text,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600),
+            ),
+          ),
+          IconButton(
+            visualDensity: VisualDensity.compact,
+            icon: const Icon(Icons.close, size: 15, color: AppTheme.muted),
+            onPressed: onDismiss,
+            tooltip: 'Dismiss',
+          ),
+        ]),
+        Text(
+          '${s.messages.length} messages · ${s.time.toLocal().month}/${s.time.toLocal().day}',
+          style: const TextStyle(color: AppTheme.muted, fontSize: 11),
+        ),
+        Padding(
+          padding: const EdgeInsets.only(top: 6, bottom: 4),
+          child: FilledButton.tonalIcon(
+            style: FilledButton.styleFrom(
+              backgroundColor: AppTheme.surface,
+              foregroundColor: AppTheme.glowAccent,
+              side: const BorderSide(color: AppTheme.border),
+              visualDensity: VisualDensity.compact,
+            ),
+            onPressed: onResume,
+            icon: const Icon(Icons.chat_bubble_outline, size: 14),
+            label: const Text('Continue conversation'),
+          ),
+        ),
+      ]),
     );
   }
 }

@@ -27,32 +27,35 @@ class CodePilotHeader extends StatelessWidget {
         // Flexible: the wordmark shrinks (never overflows) on narrow
         // screens where wordmark + Create Project + menu exceed the width.
         Flexible(
-          child: const Text.rich(
-            TextSpan(
-              children: [
-                TextSpan(
-                  text: 'Code',
-                  style: TextStyle(
-                    color: AppTheme.text,
-                    fontSize: 34,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: -0.5,
+          child: FittedBox(
+            fit: BoxFit.scaleDown,
+            alignment: Alignment.centerLeft,
+            child: Text.rich(
+              TextSpan(
+                children: [
+                  TextSpan(
+                    text: 'Code',
+                    style: TextStyle(
+                      color: AppTheme.text,
+                      fontSize: 34,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: -0.5,
+                    ),
                   ),
-                ),
-                TextSpan(
-                  text: 'Pilot',
-                  style: TextStyle(
-                    color: AppTheme.glowAccent,
-                    fontSize: 34,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: -0.5,
+                  TextSpan(
+                    text: 'Pilot',
+                    style: TextStyle(
+                      color: AppTheme.glowAccent,
+                      fontSize: 34,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: -0.5,
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
+              key: ValueKey('codepilot_wordmark'),
+              maxLines: 1,
             ),
-            key: ValueKey('codepilot_wordmark'),
-            overflow: TextOverflow.ellipsis,
-            maxLines: 1,
           ),
         ),
         if (onCreateProject != null)

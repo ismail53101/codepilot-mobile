@@ -201,6 +201,109 @@ class AgentStep {
   });
 }
 
+/// Manus-style "What the agent did" roll-up — derived ONLY from real
+/// executed [AgentStep]s, never fabricated. The activity panel renders this
+/// when a task completes so the user can see the concrete outcome.
+class AgentActionSummary {
+  final List<String> filesChanged; // created / updated / moved paths
+  final List<String> filesDeleted;
+  final List<String> commandsRun;
+  final List<String> commits; // commit messages (tool args)
+  final int filesRead; // read_file + list_files executions
+  final int searches;
+  final int failedSteps;
+  final int totalSteps;
+
+  const AgentActionSummary({
+    required this.filesChanged,
+    required this.filesDeleted,
+    required this.commandsRun,
+    required this.commits,
+    required this.filesRead,
+    required this.searches,
+    required this.failedSteps,
+    required this.totalSteps,
+  });
+
+  factory AgentActionSummary.fromSteps(List<AgentStep> steps) {
+    final changed = <String>[];
+    final deleted = <String>[];
+    final commands = <String>[];
+    final commits = <String>[];
+    var reads = 0;
+    var searches = 0;
+    var failed = 0;
+    void addUnique(List<String> list, String? value) {
+      final v = value?.trim();
+      if (v == null || v.isEmpty || list.contains(v)) return;
+      list.add(v);
+    }
+
+    for (final s in steps) {
+      if (s.status == AgentStepStatus.failed) failed++;
+      switch (s.tool) {
+        case 'write_file':
+        case 'create_file':
+        case 'patch_file':
+          addUnique(changed, s.args['path'] as String?);
+          break;
+        case 'move_file':
+          addUnique(changed, (s.args['destination'] ?? s.args['to']) as String?);
+          break;
+        case 'delete_file':
+          addUnique(deleted, s.args['path'] as String?);
+          break;
+        case 'run_command':
+          addUnique(commands, s.args['command'] as String?);
+          break;
+        case 'git_commit':
+          addUnique(commits, s.args['message'] as String?);
+          break;
+        case 'read_file':
+        case 'list_files':
+          reads++;
+          break;
+        case 'search_code':
+          searches++;
+          break;
+      }
+    }
+    return AgentActionSummary(
+      filesChanged: changed,
+      filesDeleted: deleted,
+      commandsRun: commands,
+      commits: commits,
+      filesRead: reads,
+      searches: searches,
+      failedSteps: failed,
+      totalSteps: steps.length,
+    );
+  }
+
+  bool get hasActions =>
+      filesChanged.isNotEmpty ||
+      filesDeleted.isNotEmpty ||
+      commandsRun.isNotEmpty ||
+      commits.isNotEmpty;
+
+  /// One-line headline, e.g. "3 files changed · 2 commands run · 1 commit".
+  String get headline {
+    final parts = <String>[];
+    if (filesChanged.isNotEmpty) parts.add('${filesChanged.length} file${filesChanged.length == 1 ? '' : 's'} changed');
+    if (filesDeleted.isNotEmpty) parts.add('${filesDeleted.length} deleted');
+    if (commandsRun.isNotEmpty) parts.add('${commandsRun.length} command${commandsRun.length == 1 ? '' : 's'} run');
+    if (commits.isNotEmpty) parts.add('${commits.length} commit${commits.length == 1 ? '' : 's'}');
+    if (parts.isEmpty) {
+      if (filesRead > 0 || searches > 0) {
+        parts.add('inspection only — no files were modified');
+      } else {
+        parts.add('no file actions');
+      }
+    }
+    return parts.join(' · ');
+  }
+}
+
 /// One file change reported by `git_status`.
 class GitFileChange {
   final String path;

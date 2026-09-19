@@ -20,6 +20,9 @@ class AgentActivityPanel extends StatelessWidget {
   final String? errorMessage;
   final VoidCallback? onCancel;
 
+  /// One-tap retry after a failed/stopped task (the screen supplies it).
+  final VoidCallback? onRetry;
+
   const AgentActivityPanel({
     super.key,
     required this.steps,
@@ -27,6 +30,7 @@ class AgentActivityPanel extends StatelessWidget {
     this.currentThought,
     this.errorMessage,
     this.onCancel,
+    this.onRetry,
   });
 
   bool get _isRunning => state == AgentTaskState.running;
@@ -109,6 +113,31 @@ class AgentActivityPanel extends StatelessWidget {
               ),
             ),
           for (final s in steps) _StepRow(step: s),
+          // Manus-style "what the agent did" roll-up, computed ONLY from
+          // real executed steps — never fabricated.
+          if (state == AgentTaskState.completed)
+            _ActionSummaryBlock(summary: AgentActionSummary.fromSteps(steps)),
+          // One-tap Retry after a failure or an accidental Stop.
+          if ((state == AgentTaskState.failed ||
+                  state == AgentTaskState.cancelled) &&
+              onRetry != null)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: FilledButton.tonalIcon(
+                  style: FilledButton.styleFrom(
+                    backgroundColor: AppTheme.surface,
+                    foregroundColor: AppTheme.glowAccent,
+                    side: const BorderSide(color: AppTheme.border),
+                    visualDensity: VisualDensity.compact,
+                  ),
+                  onPressed: onRetry,
+                  icon: const Icon(Icons.refresh, size: 16),
+                  label: const Text('Retry task'),
+                ),
+              ),
+            ),
           const SizedBox(height: 4),
         ],
       ),
@@ -150,6 +179,87 @@ class AgentActivityPanel extends StatelessWidget {
   static String _firstLine(String s) {
     final t = s.trim().replaceAll('\n', ' ');
     return t.length > 90 ? '${t.substring(0, 90)}…' : t;
+  }
+}
+
+/// "What the agent did" — compact action roll-up shown when the task
+/// completes, like Manus/Freebuff. Data comes ONLY from the real executed
+/// steps ([AgentActionSummary.fromSteps]); nothing is invented.
+class _ActionSummaryBlock extends StatelessWidget {
+  final AgentActionSummary summary;
+
+  const _ActionSummaryBlock({required this.summary});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.fromLTRB(12, 2, 12, 8),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: AppTheme.bg,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: AppTheme.border),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          const Icon(Icons.fact_check_outlined,
+              size: 14, color: AppTheme.glowAccent),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text('What the agent did · ${summary.headline}',
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                    color: AppTheme.text,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600)),
+          ),
+        ]),
+        if (summary.commits.isNotEmpty)
+          _row(Icons.commit_outlined, 'Committed: ${summary.commits.first}'),
+        if (summary.commandsRun.isNotEmpty)
+          _row(Icons.terminal,
+              'Ran ${summary.commandsRun.length} command${summary.commandsRun.length == 1 ? '' : 's'}'),
+        if (summary.filesRead > 0)
+          _row(Icons.menu_book_outlined,
+              'Read ${summary.filesRead} file${summary.filesRead == 1 ? '' : 's'} / listings'),
+        if (summary.searches > 0)
+          _row(Icons.search,
+              'Searched ${summary.searches} time${summary.searches == 1 ? '' : 's'}'),
+        for (final f in summary.filesChanged.take(6))
+          _row(Icons.edit_note, f, mono: true),
+        for (final f in summary.filesDeleted.take(3))
+          _row(Icons.delete_outline, f, mono: true, strike: true),
+        if (summary.failedSteps > 0)
+          _row(Icons.warning_amber_outlined,
+              '${summary.failedSteps} step${summary.failedSteps == 1 ? '' : 's'} failed — see rows above'),
+      ]),
+    );
+  }
+
+  Widget _row(IconData icon, String text,
+      {bool mono = false, bool strike = false}) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 5, left: 2),
+      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Icon(icon, size: 13, color: AppTheme.muted),
+        const SizedBox(width: 7),
+        Expanded(
+          child: Text(
+            text,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              color: AppTheme.muted,
+              fontSize: 11.5,
+              fontFamily: mono ? 'monospace' : null,
+              decoration: strike ? TextDecoration.lineThrough : null,
+            ),
+          ),
+        ),
+      ]),
+    );
   }
 }
 

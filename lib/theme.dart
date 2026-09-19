@@ -79,7 +79,20 @@ class AppTheme {
       ),
       listTileTheme: const ListTileThemeData(iconColor: muted),
       dividerColor: border,
-      snackBarTheme: const SnackBarThemeData(behavior: SnackBarBehavior.floating),
+      // Modern dark toast instead of the stock white strip: floating,
+      // rounded navy panel with readable text and accent actions.
+      snackBarTheme: const SnackBarThemeData(
+        behavior: SnackBarBehavior.floating,
+        backgroundColor: surface2,
+        elevation: 8,
+        contentTextStyle: TextStyle(color: text, fontSize: 13.5, height: 1.35),
+        actionTextColor: glowAccent,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.all(Radius.circular(12)),
+          side: BorderSide(color: border),
+        ),
+        insetPadding: EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      ),
     );
   }
 }

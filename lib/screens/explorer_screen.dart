@@ -52,6 +52,12 @@ class _ExplorerScreenState extends State<ExplorerScreen> {
       appBar: AppBar(
         title: Text('Explorer · ${name ?? 'no project'}'),
         actions: [
+          if (name != null)
+            IconButton(
+              icon: const Icon(Icons.download_outlined),
+              tooltip: 'Download project as ZIP',
+              onPressed: () => Navigator.pushNamed(context, '/export'),
+            ),
           IconButton(icon: const Icon(Icons.refresh), onPressed: _load),
           IconButton(icon: const Icon(Icons.chat), tooltip: 'AI Chat', onPressed: () => Navigator.pushNamed(context, '/chat')),
         ],

@@ -218,8 +218,12 @@ class ProjectService {
 
   /// Create a REAL project workspace from a template: writes actual files
   /// the agent can immediately inspect and modify. GitHub is NOT involved.
+  /// Create a real workspace from a template. [onProgress] reports real
+  /// creation stages — every tick corresponds to files actually written,
+  /// never a fake timer — so the UI can show a Manus-style build timeline.
   Future<String> createProjectFromTemplate(
-      String name, ProjectTemplate template) async {
+      String name, ProjectTemplate template,
+      {void Function(int done, int total, String currentPath)? onProgress}) async {
     final clean = _cleanProjectName(name);
     final dir = await projectsDir();
     final root = Directory(p.join(dir.path, clean));
@@ -229,15 +233,26 @@ class ProjectService {
     root.createSync(recursive: true);
     final safeName = clean.replaceAll('_', ' ');
 
+    final total = template.files.length + template.dirs.length;
+    var done = 0;
+
     for (final f in template.files) {
       final out = resolveFileIn(root, f.path);
       out.createSync(recursive: true);
       out.writeAsStringSync(
           f.content.replaceAll('__PROJECT_NAME__', safeName),
           flush: true);
+      done++;
+      onProgress?.call(done, total, f.path);
+      // Yield to the event loop between files so the progress UI animates
+      // even for fast templates (real work drives every tick).
+      await Future<void>.delayed(Duration.zero);
     }
     for (final d in template.dirs) {
       Directory(p.join(root.path, d)).createSync(recursive: true);
+      done++;
+      onProgress?.call(done, total, '$d/');
+      await Future<void>.delayed(Duration.zero);
     }
 
     _writeProjectMarker(root, clean, template);
@@ -421,36 +436,59 @@ class ProjectService {
     return false;
   }
 
-  /// Export the project as a ZIP. Skips files listed in .codepilot_exclude
-  /// (e.g. any local secret file) — the API key lives in secure storage and
-  /// is never part of the project directory, so it can never be exported.
-  Future<String> exportZip() async {
-    final exclude = <String>{'.codepilot_exclude'};
-    final excludeFile = File(p.join(root.path, '.codepilot_exclude'));
-    if (excludeFile.existsSync()) {
-      exclude.addAll(excludeFile
-          .readAsLinesSync()
-          .map((l) => l.trim())
-          .where((l) => l.isNotEmpty));
+  /// Internal metadata / runtime files that must never appear in an
+  /// exported ZIP.
+  static const _internalFiles = {
+    '.codepilot_exclude',
+    '.codepilot_manifest.json',
+    '.codepilot_project.json',
+  };
+  static const _internalDirs = {'.git'};
+
+  /// Build the export archive in memory: the current state of every project
+  /// file, minus internal metadata (manifest, marker, exclude list) and the
+  /// .git directory. Returns the raw ZIP bytes for download/share.
+  List<int> zipBytes() {
+    final rootDir = root;
+    final excludeFile = File(p.join(rootDir.path, '.codepilot_exclude'));
+    final exclude = <String>{
+      ..._internalFiles,
+      if (excludeFile.existsSync())
+        ...excludeFile
+            .readAsLinesSync()
+            .map((l) => l.trim())
+            .where((l) => l.isNotEmpty),
+    };
+
+    final archive = Archive();
+    void addDir(Directory dir, String prefix) {
+      for (final entity in dir.listSync(recursive: false)) {
+        final name = p.basename(entity.path);
+        if (entity is Directory) {
+          if (_internalDirs.contains(name)) continue;
+          addDir(entity, prefix.isEmpty ? name : '$prefix/$name');
+        } else if (entity is File) {
+          if (_internalFiles.contains(name)) continue; // metadata never exports
+          final rel = prefix.isEmpty ? name : '$prefix/$name';
+          // Honor user exclusions (path or substring match, like before).
+          if (exclude.any((pat) => rel == pat || rel.contains(pat))) continue;
+          final bytes = entity.readAsBytesSync();
+          archive.addFile(ArchiveFile(rel, bytes.length, bytes));
+        }
+      }
     }
-    final encoder = ZipFileEncoder();
+
+    addDir(rootDir, '');
+    return ZipEncoder().encode(archive)!;
+  }
+
+  /// Export the project as a ZIP file on disk (Export screen). Skips
+  /// internal metadata and .codepilot_exclude entries — the API key lives
+  /// in secure storage and is never part of the project directory.
+  Future<String> exportZip() async {
     final dir = await projectsDir();
     final outPath = p.join(dir.path, '${_projectName}_export.zip');
-    encoder.create(outPath);
-    await encoder.addDirectory(root);
-    await encoder.close();
-
-    // Rebuild the zip without excluded entries (archive package rewrite).
-    if (exclude.length > 1) {
-      final input = File(outPath).readAsBytesSync();
-      final decoded = ZipDecoder().decodeBytes(input);
-      final out = Archive();
-      for (final f in decoded) {
-        if (exclude.any(f.name.contains)) continue;
-        out.addFile(f);
-      }
-      File(outPath).writeAsBytesSync(ZipEncoder().encode(out)!);
-    }
+    File(outPath).writeAsBytesSync(zipBytes(), flush: true);
     return outPath;
   }
 
