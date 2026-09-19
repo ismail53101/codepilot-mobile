@@ -63,6 +63,33 @@ class ToolRegistry {
       'ERROR: no project is open. Ask the user to import one first '
       '(Home → File → ZIP, or Integrations → GitHub → Import).';
 
+  /// Validate a tool-supplied path BEFORE it reaches the filesystem:
+  /// relative, no traversal, no leading repo-name folder (a real mistake
+  /// models make — they re-create the GitHub zipball's top folder inside
+  /// the project), no absolute paths.
+  ({bool ok, String? error, String path}) _checkPath(String raw) {
+    var path = raw.trim().replaceAll('\\\\', '/');
+    if (path.isEmpty) return (ok: false, error: 'empty path', path: path);
+    if (path.startsWith('/') || RegExp(r'^[A-Za-z]:').hasMatch(path)) {
+      return (ok: false, error: 'absolute paths are not allowed', path: path);
+    }
+    final segs = path.split('/').where((s) => s.isNotEmpty && s != '.').toList();
+    if (segs.any((s) => s == '..')) {
+      return (ok: false, error: 'path traversal (..) is not allowed', path: path);
+    }
+    // Strip a leading folder named after the repo/zipball (e.g.
+    // "owner-repo-sha/lib/x.dart" when the project root IS that repo).
+    final manifestHint = projects.projectName ?? '';
+    if (segs.isNotEmpty &&
+        segs.first.contains('-') &&
+        (manifestHint.isEmpty || segs.first != manifestHint) &&
+        segs.length > 1 &&
+        (segs.first.startsWith('ismail') || segs.first.contains(RegExp(r'-[0-9a-f]{7,}$')))) {
+      path = segs.skip(1).join('/');
+    }
+    return (ok: true, error: null, path: path);
+  }
+
   List<AgentTool> buildTools() => [
         _listFiles(),
         _readFile(),
@@ -152,9 +179,10 @@ class ToolRegistry {
         },
         execute: (args) async {
           if (!_hasProject) return _noProject();
-          final path = args['path'] as String? ?? '';
-          final content = projects.readFile(path);
-          if (content == null) return 'ERROR: file not found: $path';
+          final check = _checkPath(args['path'] as String? ?? '');
+          if (!check.ok) return 'ERROR: invalid path: ${check.error}';
+          final content = projects.readFile(check.path);
+          if (content == null) return 'ERROR: file not found: ${check.path}';
           return content.length > 12000
               ? '${content.substring(0, 12000)}\n… (truncated at 12000 chars)'
               : content;
@@ -219,7 +247,9 @@ class ToolRegistry {
           'required': ['path', 'content'],
         },
         execute: (args) => _guardedWrite('write_file', args, () async {
-          final path = args['path'] as String? ?? '';
+          final check = _checkPath(args['path'] as String? ?? '');
+          if (!check.ok) return 'ERROR: invalid path: ${check.error}';
+          final path = check.path;
           final content = args['content'] as String? ?? '';
           final existed = projects.readFile(path) != null;
           projects.writeFile(path, content);
@@ -241,7 +271,9 @@ class ToolRegistry {
           'required': ['path', 'content'],
         },
         execute: (args) => _guardedWrite('create_file', args, () async {
-          final path = args['path'] as String? ?? '';
+          final check = _checkPath(args['path'] as String? ?? '');
+          if (!check.ok) return 'ERROR: invalid path: ${check.error}';
+          final path = check.path;
           final content = args['content'] as String? ?? '';
           if (projects.readFile(path) != null) {
             return 'ERROR: $path already exists — use write_file to overwrite.';
@@ -268,7 +300,9 @@ class ToolRegistry {
           'required': ['path', 'old_text', 'new_text'],
         },
         execute: (args) => _guardedWrite('patch_file', args, () async {
-          final path = args['path'] as String? ?? '';
+          final check = _checkPath(args['path'] as String? ?? '');
+          if (!check.ok) return 'ERROR: invalid path: ${check.error}';
+          final path = check.path;
           final oldText = args['old_text'] as String? ?? '';
           final newText = args['new_text'] as String? ?? '';
           final content = projects.readFile(path);
@@ -298,7 +332,9 @@ class ToolRegistry {
           'required': ['path'],
         },
         execute: (args) => _guardedWrite('delete_file', args, () async {
-          final path = args['path'] as String? ?? '';
+          final check = _checkPath(args['path'] as String? ?? '');
+          if (!check.ok) return 'ERROR: invalid path: ${check.error}';
+          final path = check.path;
           final content = projects.readFile(path);
           if (content == null) return 'ERROR: file not found: $path';
           projects.deleteFile(path);
@@ -319,12 +355,15 @@ class ToolRegistry {
           'required': ['source', 'destination'],
         },
         execute: (args) => _guardedWrite('move_file', args, () async {
-          final from = args['source'] as String? ?? '';
-          final to = args['destination'] as String? ?? '';
-          final dest = projects.moveFile(from, to);
-          await projects.recordChangeInManifest(from, 'D');
+          final fromCheck = _checkPath(args['source'] as String? ?? '');
+          final toCheck = _checkPath(args['destination'] as String? ?? '');
+          if (!fromCheck.ok || !toCheck.ok) {
+            return 'ERROR: invalid path: ${fromCheck.error ?? toCheck.error}';
+          }
+          final dest = projects.moveFile(fromCheck.path, toCheck.path);
+          await projects.recordChangeInManifest(fromCheck.path, 'D');
           await projects.recordChangeInManifest(dest, 'A');
-          return 'OK: moved $from → $dest.';
+          return 'OK: moved ${fromCheck.path} → $dest.';
         }),
       );
 
