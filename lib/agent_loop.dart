@@ -57,18 +57,19 @@ class AgentApprovalNeeded {
 
 /// The autonomous agent loop.
 ///
-/// USER PROMPT → [context build] → LLM with tools → execute tool calls →
-/// feed results back → repeat (up to [maxRounds]) → final answer.
+/// USER PROMPT → [context build] → LLM with tools → execute tools (each with
+/// its own timeout) → feed results back → repeat (up to [maxRounds]) → final
+/// answer.
 ///
 /// Lifecycle guarantees:
-/// - [outcome] is a broadcast stream that emits EXACTLY ONE [AgentOutcome],
-///   always in a final state (completed / failed / cancelled). Late duplicate
-///   final events are impossible by construction ([_finalize] runs once).
-/// - A watchdog timer bounds the whole task ([taskTimeout]); timeouts
-///   finalize as FAILED unless the task already finished.
-/// - [cancel] flips to STOPPING immediately: in-flight LLM requests are
-///   aborted through the [CancelToken], no new tools start, pending
-///   approvals resolve, and the run finalizes as CANCELLED.
+/// - [outcome] emits EXACTLY ONE final [AgentOutcome] per run.
+/// - The watchdog measures **inactivity**: it re-arms before EVERY LLM call
+///   and EVERY tool execution. Long multi-step tasks are fine; a task stuck
+///   longer than [stepTimeout] on a single operation (hung request, stuck
+///   subprocess) is finalized FAILED and the stuck operation aborted.
+/// - [cancel] flips to STOPPING immediately: in-flight LLM requests abort
+///   through the [CancelToken], running subprocesses are killed, no new
+///   tools start, pending approvals resolve, run finalizes CANCELLED.
 ///
 /// Approval modes:
 /// - planOnly: one LLM round, tools provided but the executor REJECTS every
@@ -85,9 +86,10 @@ class AgentLoop {
   final AgentMode mode;
   final int maxRounds;
 
-  /// Hard ceiling for the WHOLE task (all rounds + tools). The default is
-  /// generous but finite — no task may run forever.
-  final Duration taskTimeout;
+  /// Inactivity ceiling: max time ONE LLM call or ONE tool execution may
+  /// take before the task finalizes as timed out. The watchdog re-arms
+  /// before every step, so total task length is unbounded (progress-driven).
+  final Duration stepTimeout;
 
   AgentLoop({
     required this.backend,
@@ -95,7 +97,7 @@ class AgentLoop {
     required this.projects,
     this.mode = AgentMode.auto,
     this.maxRounds = 10,
-    this.taskTimeout = const Duration(minutes: 6),
+    this.stepTimeout = const Duration(minutes: 3),
   });
 
   final _events = StreamController<AgentEvent>.broadcast();
@@ -115,17 +117,19 @@ class AgentLoop {
 
   bool _cancelled = false;
   CancelToken? _cancelToken; // aborts the in-flight LLM request
-  Timer? _watchdog;
-  Completer<void>? _drained; // resolved when the run() future settles
+  Timer? _watchdog; // inactivity watchdog — re-armed per step
+  CancelToken? _toolCancel; // aborts/kill the running tool (subprocess etc.)
 
-  /// Begin stopping: flip state, abort HTTP, refuse new work. Safe to call
-  /// multiple times and from any thread of execution.
+  /// Begin stopping: flip state, abort HTTP, kill subprocesses, refuse new
+  /// work. Safe to call multiple times.
   void cancel() {
     if (_state.isFinal || _state == AgentTaskState.stopping) return;
     _cancelled = true;
     if (_state == AgentTaskState.running) _state = AgentTaskState.stopping;
     // Abort the in-flight LLM request immediately (socket close).
     _cancelToken?.cancel();
+    // Kill any running tool subprocess / abort its waits.
+    _toolCancel?.cancel();
     // A user cancelling while an approval dialog is up must not leave the
     // loop (or the registry gate) hanging forever.
     for (final c in _pendingApprovals.values) {
@@ -147,11 +151,35 @@ class AgentLoop {
     'create_pull_request',
   };
 
+  /// (Re-)arm the inactivity watchdog for the NEXT step (LLM call or tool).
+  /// [budget] may extend [stepTimeout] for tools that legitimately poll
+  /// longer (e.g. ci_status waits up to 5 minutes internally).
+  void _armWatchdog(String what, {Duration? budget}) {
+    final limit = budget ?? stepTimeout;
+    _watchdog?.cancel();
+    _watchdog = Timer(limit, () {
+      if (_state.isFinal) return;
+      _cancelToken?.cancel();
+      _toolCancel?.cancel();
+      for (final c in _pendingApprovals.values) {
+        if (!c.isCompleted) c.complete(false);
+      }
+      _pendingApprovals.clear();
+      _finalize(AgentOutcome(
+        AgentTaskState.failed,
+        'Task timed out: $what exceeded the '
+            '${limit.inSeconds}s step limit.',
+        detail: 'deadline_exceeded: the inactivity watchdog aborted the '
+            'stuck operation so the UI can never hang on a spinner.',
+      ));
+    });
+  }
+
   /// Run the agent for [userRequest]. Returns the final assistant text.
   ///
-  /// The returned future ALWAYS completes (never hangs): every code path is
-  /// wrapped by the watchdog, and the catch-all converts unexpected errors
-  /// into a FAILED outcome. Exactly one outcome is emitted.
+  /// The returned future ALWAYS completes: the watchdog re-arms before every
+  /// LLM call and tool execution, and the catch-all converts unexpected
+  /// errors into a FAILED outcome. Exactly one outcome is emitted.
   Future<String> run(String userRequest, {List<ChatMessage>? priorHistory}) {
     if (_state == AgentTaskState.running || _state == AgentTaskState.stopping) {
       throw StateError('AgentLoop.run called while already running — '
@@ -160,28 +188,9 @@ class AgentLoop {
     _state = AgentTaskState.running;
     _cancelled = false;
 
-    // Watchdog: bounds the entire task. If it fires, finalize as FAILED
-    // (unless already final) and abort any in-flight request.
-    _watchdog = Timer(taskTimeout, () {
-      if (_state.isFinal) return;
-      _cancelToken?.cancel();
-      for (final c in _pendingApprovals.values) {
-        if (!c.isCompleted) c.complete(false);
-      }
-      _pendingApprovals.clear();
-      _finalize(AgentOutcome(
-        AgentTaskState.failed,
-        'Task timed out after ${taskTimeout.inMinutes} minutes.',
-        detail: 'deadline_exceeded: the agent watchdog stopped the task so '
-            'the UI can never hang on a running spinner.',
-      ));
-    });
-
     return _runInner(userRequest, priorHistory).whenComplete(() {
       _watchdog?.cancel();
       _watchdog = null;
-      _drained?.complete();
-      _drained = null;
     });
   }
 
@@ -200,13 +209,14 @@ class AgentLoop {
       for (var round = 0; round < maxRounds; round++) {
         if (_cancelled) {
           _finalize(const AgentOutcome(AgentTaskState.cancelled,
-              'Task cancelled — stopped by the user.'));
+              'Task stopped by the user.'));
           return finalText;
         }
 
         final ({String content, List<ToolCall> toolCalls}) resp;
         try {
           _cancelToken = CancelToken();
+          _armWatchdog('the model request');
           // retries: 1 — a provider timeout should fail the task promptly
           // instead of silently retrying for many minutes.
           resp = await backend.chatWithTools(
@@ -218,7 +228,7 @@ class AgentLoop {
         } on ApiException catch (e) {
           if (_cancelled || e.kind == 'cancelled') {
             _finalize(const AgentOutcome(AgentTaskState.cancelled,
-                'Task cancelled — stopped by the user.'));
+                'Task stopped by the user.'));
             return finalText;
           }
           _finalize(AgentOutcome(AgentTaskState.failed, e.message,
@@ -234,7 +244,7 @@ class AgentLoop {
 
         if (_cancelled) {
           _finalize(const AgentOutcome(AgentTaskState.cancelled,
-              'Task cancelled — stopped by the user.'));
+              'Task stopped by the user.'));
           return finalText;
         }
 
@@ -270,9 +280,13 @@ class AgentLoop {
         for (final call in resp.toolCalls) {
           if (_cancelled) {
             _finalize(const AgentOutcome(AgentTaskState.cancelled,
-                'Task cancelled — stopped by the user.'));
+                'Task stopped by the user.'));
             return finalText;
           }
+          _armWatchdog('tool "${call.name}"',
+              budget: call.name == 'ci_status'
+                  ? const Duration(minutes: 6)
+                  : null);
           final result = await _executeStep(call);
           if (_state.isFinal) return finalText; // watchdog/cancel mid-step
           messages.add(ChatMessage(
@@ -286,6 +300,7 @@ class AgentLoop {
       // Ran out of rounds — one final no-tools call to force a wrap-up.
       try {
         _cancelToken = CancelToken();
+        _armWatchdog('the summary request');
         final wrap = await backend.chatWithTools([
           ...messages,
           ChatMessage(
@@ -389,10 +404,31 @@ class AgentLoop {
     }
 
     String result;
+    // Per-tool budget: commands die at the terminal's own 30s cap; CI
+    // polling legitimately waits up to 5 minutes; everything else 60s.
+    final perTool = switch (call.name) {
+      'ci_status' => const Duration(minutes: 6),
+      'run_command' => const Duration(seconds: 60),
+      _ => const Duration(seconds: 60),
+    };
     try {
-      result = await registry.execute(call.name, call.arguments);
+      // Per-tool timeout + cancellation: a slow tool (build, CI poll,
+      // subprocess) can never wedge the whole task. The tool sees a cancel
+      // token it can honor (subprocess kill, poll abort).
+      _toolCancel = CancelToken();
+      result = await registry
+          .execute(call.name, call.arguments,
+              cancelToken: _toolCancel, timeout: perTool)
+          .timeout(perTool + const Duration(seconds: 30), onTimeout: () {
+        _toolCancel?.cancel();
+        return 'ERROR: tool "${call.name}" timed out after '
+            '${perTool.inSeconds}s and was aborted. Do NOT retry the same '
+            'long-running call; report the timeout and continue.';
+      });
     } catch (e) {
       result = 'ERROR: tool crashed: $e';
+    } finally {
+      _toolCancel = null;
     }
     if (_state.isFinal) return result;
 
@@ -464,8 +500,10 @@ Working rules:
 4. VERIFY after editing when possible: re-read the changed region or run a safe read-only command (run_command supports ls/cat/grep/find on-device).
 5. If a verification or command FAILS, read the error, fix the cause, and retry — up to 3 attempts — before reporting failure.
 6. When the user asks to commit: run git_status, then git_commit with a clear message. For a PR: create_branch → commit to it → create_pull_request. These need a linked GitHub repository.
-7. FINAL MESSAGE: a compact summary — Changes, Files changed, Verification, and Git result (commit hash / PR link) when applicable. Plain text; the UI renders it.
-8. NEVER invent tool results. NEVER claim a file was modified unless a write tool returned OK. NEVER claim tests passed unless you actually ran them and they passed.
+7. NEVER use sleep, long-running watchers, or busy-wait loops — they are blocked and waste the task budget. To watch a build: use ci_status (it polls for up to 5 minutes internally), or ci_status {"wait": false} for a quick check.
+8. Each tool call has its own time limit (commands 120s, CI polling 5 min). If a tool times out, do NOT retry the same call — report the timeout and continue or summarize.
+9. FINAL MESSAGE: a compact summary — Changes, Files changed, Verification, and Git result (commit hash / PR link) when applicable. Plain text; the UI renders it.
+10. NEVER invent tool results. NEVER claim a file was modified unless a write tool returned OK. NEVER claim tests passed unless you actually ran them and they passed.
 ''';
     if (hasProject) {
       return '$base\nA project IS open. Use tools on it. Do not ask the user to paste files.';

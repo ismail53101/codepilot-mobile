@@ -1,7 +1,10 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:path/path.dart' as p;
+
+import 'api_client.dart' show CancelToken;
 
 /// Real shell execution on Android, inside the project directory.
 ///
@@ -18,6 +21,7 @@ class TerminalExecutor {
   /// app sandbox does not have.
   static const _deny = [
     'rm -rf /',
+    'watch ',
     'mkfs',
     'dd if=',
     ':(){ :|:&',
@@ -62,6 +66,14 @@ class TerminalExecutor {
         return (allowed: false, reason: 'Command rejected for safety: contains "$d".');
       }
     }
+    // Blocking waits waste the task budget — the agent must poll with
+    // tools (e.g. ci_status) instead of `sleep 180`. Match the command
+    // word precisely so `grep sleep lib` still works.
+    if (RegExp(r'(^|[;&|]\s*)sleep(\s|$)').hasMatch(trimmed)) {
+      return (allowed: false,
+          reason: 'sleep is not allowed — poll with tools instead '
+              '(e.g. ci_status with wait:true) instead of waiting blindly.');
+    }
     // Redirection: only reject writing OUTSIDE the project is hard to prove
     // in a shell string; simplest honest policy is to disallow redirects and
     // let the model use write_file instead.
@@ -92,9 +104,13 @@ class TerminalExecutor {
   }
 
   /// Run [command] with cwd = the open project root.
-  /// Returns (exitCode, stdout+stderr merged, wasTimedOut).
+  ///
+  /// Cancellation: [cancelToken] kills the subprocess immediately (user
+  /// Stop, or the loop's step watchdog). Timeout kills it too and reports
+  /// timedOut=true. Returns (exitCode, stdout+stderr merged, wasTimedOut).
   Future<({int exitCode, String output, bool timedOut})> run(
-      String command, String cwd) async {
+      String command, String cwd,
+      {CancelToken? cancelToken}) async {
     final check = isAllowed(command);
     if (!check.allowed) {
       return (exitCode: 126, output: check.reason ?? 'Command rejected.', timedOut: false);
@@ -115,20 +131,32 @@ class TerminalExecutor {
       );
       final out = <int>[];
       final err = <int>[];
-      final timer = Timer(timeout, () {
+      var killed = false;
+      void kill() {
+        if (killed) return;
+        killed = true;
         proc.kill(ProcessSignal.sigkill);
-      });
+      }
+
+      final timer = Timer(timeout, kill);
+      final cancelSub =
+          cancelToken?.future.then((_) => kill());
       final stdSub = proc.stdout.listen(out.addAll);
       final errSub = proc.stderr.listen(err.addAll);
       final code = await proc.exitCode;
       timer.cancel();
       await stdSub.asFuture<void>();
       await errSub.asFuture<void>();
+      await cancelSub;
       var text = utf8Safe(out) + utf8Safe(err);
       if (text.length > 8000) {
         text = '${text.substring(0, 8000)}\n… (output truncated)';
       }
-      return (exitCode: code, output: text.trim(), timedOut: false);
+      return (
+        exitCode: killed ? -9 : code,
+        output: text.trim(),
+        timedOut: killed,
+      );
     } on ProcessException catch (e) {
       return (
         exitCode: 127,
@@ -140,7 +168,7 @@ class TerminalExecutor {
 
   static String utf8Safe(List<int> bytes) {
     try {
-      return String.fromCharCodes(bytes);
+      return utf8.decode(bytes, allowMalformed: true);
     } catch (_) {
       return '(binary output)';
     }

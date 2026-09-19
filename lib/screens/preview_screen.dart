@@ -3,18 +3,24 @@ import 'package:flutter/services.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
 import '../main.dart';
+import '../preview_server.dart';
 import '../project_service.dart';
 import '../theme.dart';
 
 /// Live preview of AI-generated HTML in an in-app WebView.
 ///
-/// Two modes:
+/// Three modes:
 /// - [rawHtml] set: renders exactly that HTML (a code block from chat).
-/// - [path] set: loads a previewable file from the open project workspace.
+/// - [path] set AND a project is open: loads the page through the local
+///   loopback HTTP server (http://127.0.0.1:port/<path>), so relative
+///   `<link href="style.css">`, `<script src="script.js">`, and
+///   `<img src="assets/logo.png">` all resolve from the workspace — CSS
+///   applies, JavaScript executes, assets load. Source files are untouched.
+/// - [path] set but no project open: falls back to rendering the single
+///   file's HTML as a string (relative resources cannot resolve there).
 ///
-/// HTML documents are darkened politely (page keeps its own colors once its
-/// own CSS loads), and a minimal mobile viewport meta is injected when the
-/// generated page forgot one — AI output frequently does.
+/// HTML documents get a minimal mobile viewport meta injected when the
+/// generated page forgot one; the author's own markup/CSS/JS is kept as-is.
 class PreviewScreen extends StatefulWidget {
   final String? rawHtml;
   final String? html;
@@ -36,8 +42,10 @@ class _PreviewScreenState extends State<PreviewScreen> {
   WebViewController? _controller;
   int _loadProgress = 100;
   String? _error;
+  bool _serverMode = false;
 
   String? _source;
+  String? _loadedUrl;
 
   String? get _raw => widget.rawHtml ?? widget.html;
 
@@ -49,15 +57,52 @@ class _PreviewScreenState extends State<PreviewScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) => _resolveSource());
   }
 
+  @override
+  void dispose() {
+    // The preview server is shared app-wide; leave it running only while
+    // this screen needs it. Restarting per navigation is cheap, but stop
+    // it when leaving the preview to avoid a lingering listener.
+    previewServerInstance.stop();
+    super.dispose();
+  }
+
   Future<void> _resolveSource() async {
-    var html = widget.rawHtml ?? widget.html;
-    if (html == null && widget.path != null) {
+    final raw = _raw;
+    if (raw != null) {
+      _initController(raw);
+      return;
+    }
+    final path = widget.path;
+    if (path == null) {
+      if (mounted) setState(() => _error = 'Nothing to preview.');
+      return;
+    }
+
+    // PROJECT MODE: serve the whole workspace over loopback HTTP.
+    final rootPath = projectService.rootPath;
+    if (rootPath != null && PreviewScreen.isPreviewable(path)) {
       try {
-        html = projectService.readFile(widget.path!);
+        final base = await previewServerInstance.start(rootPath);
+        final url = '$base/${path.split('/').map(Uri.encodeComponent).join('/')}';
+        if (!mounted) return;
+        setState(() => _serverMode = true);
+        _initControllerWithUrl(url);
+        return;
       } on ProjectException catch (e) {
         if (mounted) setState(() => _error = e.message);
         return;
+      } catch (e) {
+        // Fall through to string mode below if the server can't bind.
       }
+    }
+
+    // STRING MODE fallback (no open project / server unavailable).
+    String? html;
+    try {
+      html = projectService.readFile(path);
+    } on ProjectException catch (e) {
+      if (mounted) setState(() => _error = e.message);
+      return;
     }
     if (html == null || html.trim().isEmpty) {
       if (mounted) setState(() => _error ??= 'Nothing to preview.');
@@ -109,7 +154,51 @@ class _PreviewScreenState extends State<PreviewScreen> {
         ),
       )
       ..loadHtmlString(_document(initialHtml));
-    setState(() => _controller = c);
+    setState(() {
+      _controller = c;
+      _loadedUrl = null;
+    });
+  }
+
+  void _initControllerWithUrl(String url) {
+    final c = WebViewController()
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setBackgroundColor(const Color(0xFFFFFFFF))
+      ..setNavigationDelegate(
+        NavigationDelegate(
+          onProgress: (p) => mounted ? setState(() => _loadProgress = p) : null,
+          onWebResourceError: (e) {
+            if (_loadProgress < 100 && mounted) {
+              setState(() => _error =
+                  'Preview failed to load: ${e.description}\n(check that "${widget.path}" exists)');
+            }
+          },
+        ),
+      )
+      ..loadRequest(Uri.parse(url));
+    setState(() {
+      _controller = c;
+      _loadedUrl = url;
+    });
+  }
+
+  Future<void> _reload() async {
+    if (_serverMode && widget.path != null) {
+      final rootPath = projectService.rootPath;
+      if (rootPath == null) return;
+      // Re-bind the server so edits are picked up (files are read from disk
+      // per request, so a plain reload is enough — but keep the root fresh).
+      final base = await previewServerInstance.start(rootPath);
+      final url = '$base/${widget.path!.split('/').map(Uri.encodeComponent).join('/')}';
+      if (url == _loadedUrl) {
+        await _controller?.reload();
+      } else {
+        _initControllerWithUrl(url);
+      }
+      return;
+    }
+    final src = _raw ?? _source;
+    if (src != null) _controller!.loadHtmlString(_document(src));
   }
 
   @override
@@ -123,12 +212,7 @@ class _PreviewScreenState extends State<PreviewScreen> {
           IconButton(
             icon: const Icon(Icons.refresh),
             tooltip: 'Reload preview',
-            onPressed: _controller == null
-                ? null
-                : () {
-                    final src = _raw ?? _source;
-                    if (src != null) _controller!.loadHtmlString(_document(src));
-                  },
+            onPressed: _controller == null ? null : _reload,
           ),
           IconButton(
             icon: const Icon(Icons.copy),

@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'dart:io';
 
+import 'api_client.dart' show CancelToken;
 import 'github_service.dart';
 import 'project_service.dart';
 import 'terminal_executor.dart';
@@ -9,7 +11,8 @@ class AgentTool {
   final String name;
   final String description;
   final Map<String, dynamic> parameters; // JSON Schema
-  final Future<String> Function(Map<String, dynamic> args) execute;
+  final Future<String> Function(Map<String, dynamic> args,
+      {CancelToken? cancelToken}) execute;
 
   const AgentTool({
     required this.name,
@@ -111,11 +114,14 @@ class ToolRegistry {
       [for (final t in buildTools()) t.toSchema()];
 
   /// Execute a tool call by name. Returns the string result for the model.
-  Future<String> execute(String name, Map<String, dynamic> args) async {
+  /// [cancelToken] lets the loop kill a running tool (subprocess, polling);
+  /// [timeout] bounds the call — the loop enforces it via Future.timeout.
+  Future<String> execute(String name, Map<String, dynamic> args,
+      {CancelToken? cancelToken, Duration? timeout}) async {
     for (final t in buildTools()) {
       if (t.name == name) {
         try {
-          return await t.execute(args);
+          return await t.execute(args, cancelToken: cancelToken);
         } on ProjectException catch (e) {
           return 'ERROR: ${e.message}';
         } on GitHubException catch (e) {
@@ -143,7 +149,7 @@ class ToolRegistry {
             'path': {'type': 'string', 'description': 'Directory path, optional.'}
           },
         },
-        execute: (args) async {
+        execute: (args, {cancelToken}) async {
           if (!_hasProject) return _noProject();
           final path = args['path'] as String?;
           if (path == null || path.isEmpty || path == '.') {
@@ -177,7 +183,7 @@ class ToolRegistry {
           },
           'required': ['path'],
         },
-        execute: (args) async {
+        execute: (args, {cancelToken}) async {
           if (!_hasProject) return _noProject();
           final check = _checkPath(args['path'] as String? ?? '');
           if (!check.ok) return 'ERROR: invalid path: ${check.error}';
@@ -202,7 +208,7 @@ class ToolRegistry {
           },
           'required': ['query'],
         },
-        execute: (args) async {
+        execute: (args, {cancelToken}) async {
           if (!_hasProject) return _noProject();
           final hits = projects.search(
             args['query'] as String? ?? '',
@@ -246,7 +252,7 @@ class ToolRegistry {
           },
           'required': ['path', 'content'],
         },
-        execute: (args) => _guardedWrite('write_file', args, () async {
+        execute: (args, {cancelToken}) => _guardedWrite('write_file', args, () async {
           final check = _checkPath(args['path'] as String? ?? '');
           if (!check.ok) return 'ERROR: invalid path: ${check.error}';
           final path = check.path;
@@ -270,7 +276,7 @@ class ToolRegistry {
           },
           'required': ['path', 'content'],
         },
-        execute: (args) => _guardedWrite('create_file', args, () async {
+        execute: (args, {cancelToken}) => _guardedWrite('create_file', args, () async {
           final check = _checkPath(args['path'] as String? ?? '');
           if (!check.ok) return 'ERROR: invalid path: ${check.error}';
           final path = check.path;
@@ -299,7 +305,7 @@ class ToolRegistry {
           },
           'required': ['path', 'old_text', 'new_text'],
         },
-        execute: (args) => _guardedWrite('patch_file', args, () async {
+        execute: (args, {cancelToken}) => _guardedWrite('patch_file', args, () async {
           final check = _checkPath(args['path'] as String? ?? '');
           if (!check.ok) return 'ERROR: invalid path: ${check.error}';
           final path = check.path;
@@ -331,7 +337,7 @@ class ToolRegistry {
           },
           'required': ['path'],
         },
-        execute: (args) => _guardedWrite('delete_file', args, () async {
+        execute: (args, {cancelToken}) => _guardedWrite('delete_file', args, () async {
           final check = _checkPath(args['path'] as String? ?? '');
           if (!check.ok) return 'ERROR: invalid path: ${check.error}';
           final path = check.path;
@@ -354,7 +360,7 @@ class ToolRegistry {
           },
           'required': ['source', 'destination'],
         },
-        execute: (args) => _guardedWrite('move_file', args, () async {
+        execute: (args, {cancelToken}) => _guardedWrite('move_file', args, () async {
           final fromCheck = _checkPath(args['source'] as String? ?? '');
           final toCheck = _checkPath(args['destination'] as String? ?? '');
           if (!fromCheck.ok || !toCheck.ok) {
@@ -388,12 +394,21 @@ class ToolRegistry {
           },
           'required': ['command'],
         },
-        execute: (args) async {
+        execute: (args, {cancelToken}) async {
           if (!_hasProject) return _noProject();
           final command = args['command'] as String? ?? '';
           final cwd = projects.rootPath!;
-          final result = await terminal.run(command, cwd);
+          // The cancel token kills the subprocess the moment Stop is
+          // pressed or the step watchdog fires.
+          final result = await terminal.run(command, cwd,
+              cancelToken: cancelToken);
           final out = result.output.isEmpty ? '(no output)' : result.output;
+          if (result.timedOut) {
+            return 'exit=timeout\n$out\n(command exceeded ${terminal.timeout.inSeconds}s and was killed)';
+          }
+          if (cancelToken?.isCancelled ?? false) {
+            return 'CANCELLED: command was stopped by the user.';
+          }
           return 'exit=${result.exitCode}\n$out';
         },
       );
@@ -412,7 +427,7 @@ class ToolRegistry {
           'type': 'object',
           'properties': const {},
         },
-        execute: (args) async {
+        execute: (args, {cancelToken}) async {
           if (!_hasProject) return _noProject();
           final changes = await projects.changedFilesSinceBaseline();
           final manifest = await projects.loadManifest();
@@ -465,7 +480,7 @@ class ToolRegistry {
           },
           'required': ['message'],
         },
-        execute: (args) async {
+        execute: (args, {cancelToken}) async {
           if (!_hasProject) return _noProject();
           final manifest = await projects.loadManifest();
           final repoFull = manifest['gitRepository'] as String?;
@@ -516,7 +531,7 @@ class ToolRegistry {
           },
           'required': ['name'],
         },
-        execute: (args) async {
+        execute: (args, {cancelToken}) async {
           final manifest = await projects.loadManifest();
           final repoFull = manifest['gitRepository'] as String?;
           if (repoFull == null) return _noProjectLinked();
@@ -551,7 +566,7 @@ class ToolRegistry {
           },
           'required': ['message'],
         },
-        execute: (args) => execute('git_commit', {
+        execute: (args, {cancelToken}) => execute('git_commit', {
           'message': args['message'] ?? 'CodePilot: push from mobile',
         }),
       );
@@ -571,7 +586,7 @@ class ToolRegistry {
           },
           'required': ['head', 'base', 'title'],
         },
-        execute: (args) async {
+        execute: (args, {cancelToken}) async {
           final manifest = await projects.loadManifest();
           final repoFull = manifest['gitRepository'] as String?;
           if (repoFull == null) return _noProjectLinked();
@@ -596,15 +611,23 @@ class ToolRegistry {
   AgentTool _ciStatus() => AgentTool(
         name: 'ci_status',
         description:
-            'Check the latest GitHub Actions run for a branch. If the run '
-            'failed, returns the failure log excerpt for error-driven repair.',
+            'Check the latest GitHub Actions run for a branch. By default '
+            'waits (polling every 10-30s, max 5 min) until the run completes; '
+            'pass {"wait": false} for an instant one-shot status check. If '
+            'the run failed, returns the failure log excerpt for repair.',
         parameters: {
           'type': 'object',
           'properties': {
             'branch': {'type': 'string'},
+            'wait': {
+              'type': 'boolean',
+              'description':
+                  'Wait for completion via bounded polling (default true). '
+                  'Use false for a quick single check.'
+            },
           },
         },
-        execute: (args) async {
+        execute: (args, {cancelToken}) async {
           final manifest = await projects.loadManifest();
           final repoFull = manifest['gitRepository'] as String?;
           if (repoFull == null) return _noProjectLinked();
@@ -616,13 +639,47 @@ class ToolRegistry {
             privateRepo: false,
           );
           final branch = args['branch'] as String? ?? repo.defaultBranch;
-          final run = await github.latestRun(repo, branch);
-          if (run == null) return 'No CI runs found for branch "$branch".';
-          if (run.conclusion == 'failure') {
-            final log = await github.fetchFailureLog(repo, run.runId);
-            return 'CI FAILED on $branch (run ${run.runId})\n$log';
+          final wait = args['wait'] as bool? ?? true;
+
+          Future<({String status, String? conclusion, int runId, String url})?>
+              check() => github.latestRun(repo, branch);
+
+          if (!wait) {
+            final run = await check();
+            if (run == null) return 'No CI runs found for branch "$branch".';
+            return 'CI on $branch: status=${run.status} '
+                'conclusion=${run.conclusion ?? '-'} (run ${run.runId})';
           }
-          return 'CI on $branch: status=${run.status} conclusion=${run.conclusion ?? '-'}';
+
+          // Bounded async polling — each check is one short request; the
+          // delay between checks happens OUTSIDE any request. Honors the
+          // cancel token (Stop works instantly) and a hard 5-minute cap.
+          final deadline = DateTime.now().add(const Duration(minutes: 5));
+          var delay = const Duration(seconds: 10);
+          while (true) {
+            if (cancelToken?.isCancelled ?? false) {
+              return 'CANCELLED: CI polling was stopped by the user.';
+            }
+            if (DateTime.now().isAfter(deadline)) {
+              return 'TIMEOUT: CI did not finish within 5 minutes of '
+                  'polling. It may still be running on GitHub — check again '
+                  'later with ci_status {"wait": false}.';
+            }
+            final run = await check();
+            if (run == null) return 'No CI runs found for branch "$branch".';
+            if (run.status == 'completed') {
+              if (run.conclusion == 'failure') {
+                final log = await github.fetchFailureLog(repo, run.runId);
+                return 'CI FAILED on $branch (run ${run.runId})\n$log';
+              }
+              return 'CI on $branch: conclusion=${run.conclusion ?? 'success'} '
+                  '(run ${run.runId}) ${run.url}';
+            }
+            // Still in progress — release the event loop, then re-check.
+            await Future<void>.delayed(delay);
+            delay = delay * 1.5;
+            if (delay > const Duration(seconds: 30)) delay = const Duration(seconds: 30);
+          }
         },
       );
 }

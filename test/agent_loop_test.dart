@@ -295,7 +295,7 @@ void main() {
         backend: backend,
         registry: _registry(ProjectService()),
         projects: ProjectService(),
-        taskTimeout: const Duration(milliseconds: 80),
+        stepTimeout: const Duration(milliseconds: 80),
       );
       // run() arms the watchdog; the hanging backend is aborted when it fires.
       final runFuture = loop.run('hang');
@@ -304,6 +304,14 @@ void main() {
       expect(loop.state, AgentTaskState.failed);
       expect(outcome.state, AgentTaskState.failed);
       expect(outcome.message, contains('timed out'));
+    });
+
+    test('sleep command is rejected by the terminal', () async {
+      final term = TerminalExecutor();
+      expect(term.isAllowed('sleep 180').allowed, isFalse);
+      expect(term.isAllowed('sleep 60 && ls').allowed, isFalse);
+      // grep for the word sleep must still work.
+      expect(term.isAllowed('grep -rn sleep lib').allowed, isTrue);
     });
 
     test('cancel finalizes as CANCELLED even with in-flight backend', () async {

@@ -557,7 +557,7 @@ class _ChatScreenState extends State<ChatScreen> {
       } else if (o.state == AgentTaskState.failed) {
         _push('system', '✕ Task failed — ${o.message}', isError: true);
       } else if (o.state == AgentTaskState.cancelled) {
-        _push('system', '⏹ Task cancelled.');
+        _push('system', '⏹ Task stopped.');
       }
       _scrollDown();
     });
@@ -567,12 +567,12 @@ class _ChatScreenState extends State<ChatScreen> {
           ? _messages.sublist(_messages.length - 10)
           : _messages;
       // Belt-and-braces: even if a backend ignored cancellation, this
-      // timeout guarantees _agentSend terminates after the watchdog.
+      // timeout guarantees _agentSend terminates. Each step is bounded by
+      // the loop's step watchdog; 30 min covers ~10 worst-case steps.
       await loop.run(
         effectiveRequest,
         priorHistory: prior.sublist(0, prior.length - 1), // exclude this turn
-      ).timeout(loop.taskTimeout + const Duration(seconds: 15),
-          onTimeout: () => '');
+      ).timeout(const Duration(minutes: 30), onTimeout: () => '');
       // Wait for the outcome event so the final state and banner are applied
       // in the same tick; the loop guarantees exactly one outcome.
       await outcomeDone.future.timeout(const Duration(seconds: 2),
@@ -662,6 +662,16 @@ class _ChatScreenState extends State<ChatScreen> {
     // Immediate UI feedback: STOPPING disables Stop and shows the banner.
     if (mounted) setState(() => _agentState = AgentTaskState.stopping);
     loop.cancel();
+    // The loop aborts its in-flight HTTP / subprocess synchronously; give
+    // it one event-loop turn to finalize, then force CANCELLED in the UI
+    // if the acknowledgment hasn't arrived (defensive — should not happen).
+    Future.delayed(const Duration(milliseconds: 600), () {
+      if (!mounted || _agentState.isFinal) return;
+      if (_agentState == AgentTaskState.stopping) {
+        setState(() => _agentState = AgentTaskState.cancelled);
+        _push('system', '⏹ Task stopped.');
+      }
+    });
   }
 
   void _cycleApprovalMode() {

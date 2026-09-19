@@ -85,7 +85,15 @@ class _FilePreviewScreenState extends State<FilePreviewScreen> {
           IconButton(
             icon: const Icon(Icons.play_arrow),
             tooltip: 'Live preview',
-            onPressed: _content == null ? null : () => openHtmlPreview(context, rawHtml: _content),
+            // Pass the PATH (not raw content) when a project is open: the
+            // preview then serves the whole workspace over loopback HTTP,
+            // so relative CSS/JS/assets resolve. Without a project, the
+            // preview screen falls back to rendering this file's HTML only.
+            onPressed: _content == null
+                ? null
+                : () => openHtmlPreview(context,
+                    path: projectService.rootPath != null ? _path : null,
+                    rawHtml: projectService.rootPath != null ? null : _content),
           ),
       ]),
       body: _error != null
