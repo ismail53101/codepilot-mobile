@@ -264,6 +264,9 @@ void main() {
       final outcomes = <AgentOutcome>[];
       final sub = loop.outcome.listen(outcomes.add);
       await loop.run('hello');
+      // Broadcast events deliver on a later microtask — pump the queue.
+      await Future<void>.delayed(Duration.zero);
+      await Future<void>.delayed(Duration.zero);
       await sub.cancel();
       expect(loop.state, AgentTaskState.completed);
       expect(outcomes.length, 1);
@@ -277,13 +280,10 @@ void main() {
         registry: _registry(ProjectService()),
         projects: ProjectService(),
       );
-      final outcomes = <AgentOutcome>[];
-      final sub = loop.outcome.listen(outcomes.add);
-      await loop.run('hello');
-      await sub.cancel();
+      final outcome = await loop.outcome.first;
       expect(loop.state, AgentTaskState.failed);
-      expect(outcomes.single.state, AgentTaskState.failed);
-      expect(outcomes.single.message, contains('boom'));
+      expect(outcome.state, AgentTaskState.failed);
+      expect(outcome.message, contains('boom'));
     });
 
     test('watchdog timeout finalizes as FAILED', () async {
@@ -294,13 +294,10 @@ void main() {
         projects: ProjectService(),
         taskTimeout: const Duration(milliseconds: 80),
       );
-      final outcomes = <AgentOutcome>[];
-      final sub = loop.outcome.listen(outcomes.add);
-      await loop.run('hang');
-      await sub.cancel();
+      final outcome = await loop.outcome.first;
       expect(loop.state, AgentTaskState.failed);
-      expect(outcomes.single.state, AgentTaskState.failed);
-      expect(outcomes.single.message, contains('timed out'));
+      expect(outcome.state, AgentTaskState.failed);
+      expect(outcome.message, contains('timed out'));
     });
 
     test('cancel finalizes as CANCELLED even with in-flight backend', () async {
@@ -310,17 +307,16 @@ void main() {
         registry: _registry(ProjectService()),
         projects: ProjectService(),
       );
-      final outcomes = <AgentOutcome>[];
-      final sub = loop.outcome.listen(outcomes.add);
       // The backend hangs forever unless cancelled; the loop must observe
       // the CancelToken and abort.
+      final outcomeFuture = loop.outcome.first;
       final runFuture = loop.run('hang');
       await Future.delayed(const Duration(milliseconds: 20));
       loop.cancel();
+      final outcome = await outcomeFuture;
       await runFuture;
-      await sub.cancel();
       expect(loop.state, AgentTaskState.cancelled);
-      expect(outcomes.single.state, AgentTaskState.cancelled);
+      expect(outcome.state, AgentTaskState.cancelled);
       expect(backend.cancelled, isTrue);
     });
 
@@ -338,6 +334,8 @@ void main() {
       await loop.run('hello');
       // Simulate a late duplicate completion — must not emit again.
       loop.cancel();
+      await Future<void>.delayed(Duration.zero);
+      await Future<void>.delayed(Duration.zero);
       await sub.cancel();
       expect(outcomes.length, 1); // only the real completion
     });
