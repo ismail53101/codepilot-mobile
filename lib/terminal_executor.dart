@@ -70,7 +70,7 @@ class TerminalExecutor {
           reason: 'Shell redirection is not allowed — use write_file/read_file tools instead.');
     }
     // Pipes ARE allowed for read-only text processing, but each stage must
-    // still avoid the denylist.
+    // still avoid the denylist and must not read outside the project.
     for (final stage in trimmed.split('|')) {
       final s = stage.trim();
       if (s.isEmpty) return (allowed: false, reason: 'Empty command stage.');
@@ -79,6 +79,13 @@ class TerminalExecutor {
         if (s.contains(d)) {
           return (allowed: false, reason: 'Command rejected for safety: stage contains "$d".');
         }
+      }
+      // Absolute paths in arguments read outside the project sandbox.
+      final abs = RegExp(r'(?<![\w-])/(?:etc|proc|sys|data|system|dev)\b');
+      if (abs.hasMatch(s)) {
+        return (allowed: false,
+            reason: 'Commands may only access files inside the project '
+                '(no /etc, /proc, /sys, /data, /system, /dev paths).');
       }
     }
     return (allowed: true, reason: null);
