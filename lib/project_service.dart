@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:archive/archive_io.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'models.dart';
 
@@ -14,6 +15,108 @@ class ProjectService {
   String? _projectName;
 
   String? get projectName => _projectName;
+
+  /// Absolute path of the open project root (for the terminal cwd).
+  String? get rootPath => _root?.path;
+
+  // ---------------- last-project persistence ----------------
+
+  static const _kLastProject = 'last_project';
+
+  /// Remember the open project so it survives app restarts.
+  Future<void> _persistLastProject() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (_projectName == null) {
+      await prefs.remove(_kLastProject);
+    } else {
+      await prefs.setString(_kLastProject, _projectName!);
+    }
+  }
+
+  /// Restore the previously opened project after an app restart.
+  /// Returns true when a project was restored.
+  Future<bool> restoreLastProject() async {
+    if (_root != null) return true;
+    final prefs = await SharedPreferences.getInstance();
+    final name = prefs.getString(_kLastProject);
+    if (name == null || name.isEmpty) return false;
+    try {
+      await openProject(name);
+      return true;
+    } on ProjectException {
+      await prefs.remove(_kLastProject); // stale entry — clean up
+      return false;
+    }
+  }
+
+  // ---------------- agent workspace manifest ----------------
+
+  /// The agent's working manifest, stored inside the project:
+  /// plan, changed files, verification results, and the last commit.
+  /// Written ONLY by real agent tool executions — the UI reads it to show
+  /// what actually happened, never to fake activity.
+  Future<Map<String, dynamic>> loadManifest() async {
+    try {
+      final f = File(p.join(root.path, '.codepilot_manifest.json'));
+      if (!f.existsSync()) return {};
+      return jsonDecode(f.readAsStringSync()) as Map<String, dynamic>;
+    } catch (_) {
+      return {};
+    }
+  }
+
+  Future<void> updateManifest(Map<String, dynamic> patch) async {
+    final current = await loadManifest();
+    current.addAll(patch);
+    current['updatedAt'] = DateTime.now().toIso8601String();
+    final f = File(p.join(root.path, '.codepilot_manifest.json'));
+    f.writeAsStringSync(jsonEncode(current), flush: true);
+  }
+
+  /// Record one file change in the manifest's changed-file list.
+  Future<void> recordChangeInManifest(String path, String kind) async {
+    final m = await loadManifest();
+    final changed = List<Map<String, dynamic>>.from(
+        (m['changedFiles'] as List?)?.whereType<Map>().map(Map<String, dynamic>.from) ?? const []);
+    changed.removeWhere((c) => c['path'] == path);
+    changed.add({'path': path, 'kind': kind, 'time': DateTime.now().toIso8601String()});
+    await updateManifest({'changedFiles': changed});
+  }
+
+  /// Compare working tree against the manifest's baseline hashes to produce
+  /// a real git-status-like report (M = content differs, A = new, D = deleted).
+  Future<List<GitFileChange>> changedFilesSinceBaseline() async {
+    final m = await loadManifest();
+    final baseline = Map<String, String>.from(m['baselineHashes'] as Map? ?? {});
+    final out = <GitFileChange>[];
+    final seen = <String>{};
+    for (final node in fileTree()) {
+      if (node.isDir || node.path == '.codepilot_manifest.json') continue;
+      seen.add(node.path);
+      final content = readFile(node.path);
+      final hash = content == null ? '' : content.hashCode.toRadixString(36);
+      if (!baseline.containsKey(node.path)) {
+        out.add(GitFileChange(node.path, 'A'));
+      } else if (baseline[node.path] != hash) {
+        out.add(GitFileChange(node.path, 'M'));
+      }
+    }
+    for (final path in baseline.keys) {
+      if (!seen.contains(path)) out.add(GitFileChange(path, 'D'));
+    }
+    return out;
+  }
+
+  /// Snapshot current file hashes as the new baseline (after a commit).
+  Future<void> snapshotBaseline() async {
+    final hashes = <String, String>{};
+    for (final node in fileTree()) {
+      if (node.isDir || node.path == '.codepilot_manifest.json') continue;
+      final content = readFile(node.path);
+      if (content != null) hashes[node.path] = content.hashCode.toRadixString(36);
+    }
+    await updateManifest({'baselineHashes': hashes});
+  }
 
   /// Directory where imported/created projects live.
   Future<Directory> projectsDir() async {
@@ -74,6 +177,8 @@ class ProjectService {
         .writeAsStringSync(baseName, flush: true);
     _root = root;
     _projectName = baseName;
+    await _persistLastProject();
+    await snapshotBaseline();
     return 'Imported $count files into "$baseName".';
   }
 
@@ -90,6 +195,8 @@ class ProjectService {
     File(p.join(root.path, '.codepilot_project')).writeAsStringSync(clean);
     _root = root;
     _projectName = clean;
+    await _persistLastProject();
+    await snapshotBaseline();
     return clean;
   }
 
@@ -100,6 +207,7 @@ class ProjectService {
     if (!root.existsSync()) throw ProjectException('Project "$name" not found.');
     _root = root;
     _projectName = name;
+    await _persistLastProject();
   }
 
   /// Root of the open project; throws if none is open.
@@ -171,6 +279,48 @@ class ProjectService {
   void deleteFile(String rel) {
     final f = resolveFile(rel);
     if (f.existsSync()) f.deleteSync();
+  }
+
+  /// Rename/move a file (or directory) within the project. Returns the
+  /// destination relative path.
+  String moveFile(String from, String to) {
+    final src = resolveFile(from);
+    if (!src.existsSync()) {
+      throw ProjectException('Not found: $from');
+    }
+    final dst = resolveFile(to);
+    if (dst.existsSync()) {
+      throw ProjectException('Destination already exists: $to');
+    }
+    dst.parent.createSync(recursive: true);
+    final moved = src.renameSync(dst.path); // rename works for dirs too
+    return p.relative(moved.path, from: root.path).replaceAll('\\', '/');
+  }
+
+  /// Direct children (one level) of a directory, relative paths.
+  List<FileNode> listDir(String rel) {
+    final dir = resolveFile(rel);
+    if (!dir.existsSync()) {
+      throw ProjectException('Directory not found: $rel');
+    }
+    if (dir is! Directory) {
+      throw ProjectException('Not a directory: $rel');
+    }
+    final out = <FileNode>[];
+    for (final e in dir.listSync()) {
+      final r = p.relative(e.path, from: root.path).replaceAll('\\', '/');
+      if (r.split('/').any(_skipDirs.contains)) continue;
+      if (e is Directory) {
+        out.add(FileNode(path: r, isDir: true));
+      } else if (e is File) {
+        out.add(FileNode(path: r, isDir: false, size: e.lengthSync()));
+      }
+    }
+    out.sort((a, b) {
+      if (a.isDir != b.isDir) return a.isDir ? -1 : 1;
+      return a.path.toLowerCase().compareTo(b.path.toLowerCase());
+    });
+    return out;
   }
 
   /// Full-text search across text files (case-insensitive substring or regex).
@@ -259,6 +409,37 @@ class ProjectService {
     if (has('requirements.txt') || has('pyproject.toml')) return 'Python';
     if (has('index.html')) return 'HTML/CSS/JS';
     return 'Unknown';
+  }
+
+  /// The project's git metadata: branch and HEAD commit, read from .git.
+  /// Returns null when the project has no .git directory.
+  ({String branch, String head})? gitInfo() {
+    final gitDir = Directory(p.join(root.path, '.git'));
+    if (!gitDir.existsSync()) return null;
+    String? branch;
+    String? head;
+    final headFile = File(p.join(gitDir.path, 'HEAD'));
+    if (headFile.existsSync()) {
+      final raw = headFile.readAsStringSync().trim();
+      final m = RegExp(r'ref: refs/heads/(.+)').firstMatch(raw);
+      branch = m?.group(1) ?? raw.substring(0, raw.length.clamp(0, 12));
+      final refFile = File(p.join(gitDir.path, 'refs', 'heads', branch ?? ''));
+      if (refFile.existsSync()) head = refFile.readAsStringSync().trim();
+    }
+    if (head == null || head.isEmpty) {
+      // Packed refs fallback (clone created by this app may pack refs).
+      final packed = File(p.join(gitDir.path, 'packed-refs'));
+      if (packed.existsSync()) {
+        for (final line in packed.readAsLinesSync()) {
+          if (line.contains('refs/heads/${branch ?? ''}')) {
+            head = line.split(' ').first.trim();
+            break;
+          }
+        }
+      }
+    }
+    if (branch == null) return null;
+    return (branch: branch, head: head ?? 'unknown');
   }
 
   /// Unified line diff between two strings.

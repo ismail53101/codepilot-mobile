@@ -27,7 +27,11 @@ import 'widgets/integration_manager.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  runApp(const CodePilotApp());
+  // Restore the previously opened project so the agent's workspace context
+  // survives app restarts (projectId/projectPath persistence).
+  projectService.restoreLastProject().then((restored) {
+    if (restored) return projectService.loadManifest();
+  }).whenComplete(() => runApp(const CodePilotApp()));
 }
 
 /// App-wide singletons (simple service locator).

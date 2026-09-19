@@ -394,10 +394,270 @@ class GitHubService {
   String _error(http.Response response) {
     try {
       final json = jsonDecode(response.body) as Map;
-      return json['message'] as String? ?? 'GitHub request failed (HTTP ${response.statusCode}).';
+      return json['message'] as String? ??
+          'GitHub request failed (HTTP ${response.statusCode}).';
     } catch (_) {
       return 'GitHub request failed (HTTP ${response.statusCode}).';
     }
+  }
+
+  // ==================================================================
+  // Real Git Data API: branches, commits, pull requests, CI status.
+  // This is a REAL git commit — a tree + commit object created via the
+  // GitHub Git database API — not one Contents-API file PUT per file.
+  // ==================================================================
+
+  /// List branches of [repo] (name + sha), most relevant first.
+  Future<List<({String name, String sha})>> listBranches(GitHubRepo repo) async {
+    final headers = await _auth();
+    final response = await http
+        .get(Uri.parse(
+            'https://api.github.com/repos/${repo.owner}/${repo.name}/branches?per_page=100'),
+            headers: headers)
+        .timeout(const Duration(seconds: 30));
+    if (response.statusCode != 200) throw GitHubException(_error(response));
+    final data = jsonDecode(response.body) as List;
+    return [
+      for (final b in data)
+        (
+          name: (b as Map)['name'] as String,
+          sha: b['commit']['sha'] as String,
+        )
+    ];
+  }
+
+  /// Create a branch at [fromSha] (defaults to the repo default branch head).
+  Future<String> createBranch(GitHubRepo repo, String branchName,
+      {String? fromSha}) async {
+    final headers = await _auth()
+      ..['Content-Type'] = 'application/json';
+    var sha = fromSha;
+    if (sha == null) {
+      final head = await http.get(
+          Uri.parse(
+              'https://api.github.com/repos/${repo.owner}/${repo.name}/git/ref/heads/${Uri.encodeComponent(repo.defaultBranch)}'),
+          headers: headers);
+      if (head.statusCode != 200) throw GitHubException(_error(head));
+      sha = ((jsonDecode(head.body) as Map)['object'] as Map)['sha'] as String;
+    }
+    final response = await http.post(
+      Uri.parse(
+          'https://api.github.com/repos/${repo.owner}/${repo.name}/git/refs'),
+      headers: headers,
+      body: jsonEncode({'ref': 'refs/heads/$branchName', 'sha': sha}),
+    );
+    if (response.statusCode != 201) {
+      final msg = _error(response);
+      if (response.statusCode == 422) {
+        throw GitHubException('Branch "$branchName" already exists.');
+      }
+      throw GitHubException(msg);
+    }
+    return sha;
+  }
+
+  /// Create a blob for [content] and return its sha.
+  Future<String> _createBlob(
+      GitHubRepo repo, String content, Map<String, String> headers) async {
+    final response = await http.post(
+      Uri.parse(
+          'https://api.github.com/repos/${repo.owner}/${repo.name}/git/blobs'),
+      headers: headers,
+      body: jsonEncode({
+        'content': base64Encode(utf8.encode(content)),
+        'encoding': 'base64',
+      }),
+    );
+    if (response.statusCode != 201) throw GitHubException(_error(response));
+    return (jsonDecode(response.body) as Map)['sha'] as String;
+  }
+
+  /// Create a REAL git commit on [branch] from a full working-tree snapshot.
+  ///
+  /// [files] maps every project file path to its current content (or null to
+  /// delete it). The tree is built fresh from these entries so the pushed
+  /// snapshot exactly matches the on-device workspace.
+  Future<({String sha, String htmlUrl})> commitTree({
+    required GitHubRepo repo,
+    required String branch,
+    required String message,
+    required Map<String, String?> files,
+  }) async {
+    final headers = await _auth()
+      ..['Content-Type'] = 'application/json';
+
+    // 1. Base commit + its tree.
+    final headResp = await http.get(
+        Uri.parse(
+            'https://api.github.com/repos/${repo.owner}/${repo.name}/git/ref/heads/${Uri.encodeComponent(branch)}'),
+        headers: headers);
+    if (headResp.statusCode != 200) {
+      throw GitHubException(
+          'Branch "$branch" not found on ${repo.fullName}. Create it first (create_branch).');
+    }
+    final baseSha =
+        ((jsonDecode(headResp.body) as Map)['object'] as Map)['sha'] as String;
+    final baseCommitResp = await http.get(
+        Uri.parse(
+            'https://api.github.com/repos/${repo.owner}/${repo.name}/git/commits/$baseSha'),
+        headers: headers);
+    if (baseCommitResp.statusCode != 200) throw GitHubException(_error(baseCommitResp));
+    final baseTree = (jsonDecode(baseCommitResp.body) as Map)['tree']['sha'] as String;
+
+    // 2. Build the new tree from the full file snapshot.
+    final treeEntries = <Map<String, dynamic>>[];
+    for (final entry in files.entries) {
+      final path = entry.key;
+      if (path == '.codepilot_manifest.json' || path == '.codepilot_project') {
+        continue; // app-internal bookkeeping never enters the repo
+      }
+      if (entry.value == null) {
+        treeEntries.add({
+          'path': path,
+          'mode': '100644',
+          'type': 'blob',
+          'sha': null,
+        }); // deletion marker
+      } else {
+        final blobSha = await _createBlob(repo, entry.value!, headers);
+        treeEntries.add({
+          'path': path,
+          'mode': '100644',
+          'type': 'blob',
+          'sha': blobSha,
+        });
+      }
+    }
+    final treeResp = await http.post(
+      Uri.parse(
+          'https://api.github.com/repos/${repo.owner}/${repo.name}/git/trees'),
+      headers: headers,
+      body: jsonEncode({'base_tree': baseTree, 'tree': treeEntries}),
+    );
+    if (treeResp.statusCode != 201) throw GitHubException(_error(treeResp));
+    final newTree = (jsonDecode(treeResp.body) as Map)['sha'] as String;
+
+    // 3. Commit object with the new tree.
+    final commitResp = await http.post(
+      Uri.parse(
+          'https://api.github.com/repos/${repo.owner}/${repo.name}/git/commits'),
+      headers: headers,
+      body: jsonEncode({'message': message, 'tree': newTree, 'parents': [baseSha]}),
+    );
+    if (commitResp.statusCode != 201) throw GitHubException(_error(commitResp));
+    final commit = jsonDecode(commitResp.body) as Map;
+    final commitSha = commit['sha'] as String;
+
+    // 4. Move the branch ref to the new commit.
+    final refResp = await http.patch(
+      Uri.parse(
+          'https://api.github.com/repos/${repo.owner}/${repo.name}/git/refs/heads/${Uri.encodeComponent(branch)}'),
+      headers: headers,
+      body: jsonEncode({'sha': commitSha, 'force': false}),
+    );
+    if (refResp.statusCode != 200) throw GitHubException(_error(refResp));
+
+    return (
+      sha: commitSha,
+      htmlUrl:
+          'https://github.com/${repo.owner}/${repo.name}/commit/$commitSha',
+    );
+  }
+
+  /// Open a pull request from [head] into [base].
+  Future<({int number, String url})> createPullRequest(
+      GitHubRepo repo, String head, String base, String title,
+      {String body = ''}) async {
+    final headers = await _auth()
+      ..['Content-Type'] = 'application/json';
+    final response = await http.post(
+      Uri.parse('https://api.github.com/repos/${repo.owner}/${repo.name}/pulls'),
+      headers: headers,
+      body: jsonEncode({'title': title, 'head': head, 'base': base, 'body': body}),
+    );
+    if (response.statusCode != 201) throw GitHubException(_error(response));
+    final data = jsonDecode(response.body) as Map;
+    return (number: data['number'] as int, url: data['html_url'] as String);
+  }
+
+  /// Latest CI run for [branch] (null when none yet).
+  Future<({String status, String? conclusion, int runId, String url})?>
+      latestRun(GitHubRepo repo, String branch) async {
+    final headers = await _auth();
+    final response = await http.get(
+        Uri.parse(
+            'https://api.github.com/repos/${repo.owner}/${repo.name}/actions/runs?branch=${Uri.encodeComponent(branch)}&per_page=1'),
+        headers: headers);
+    if (response.statusCode != 200) throw GitHubException(_error(response));
+    final runs = ((jsonDecode(response.body) as Map)['workflow_runs'] as List?) ?? const [];
+    if (runs.isEmpty) return null;
+    final run = runs.first as Map;
+    return (
+      status: run['status'] as String? ?? 'unknown',
+      conclusion: run['conclusion'] as String?,
+      runId: run['id'] as int,
+      url: run['html_url'] as String? ?? '',
+    );
+  }
+
+  /// Download the failed step of a CI run for error-driven repair.
+  /// Returns the first ~6k chars of the failed job's log.
+  Future<String> fetchFailureLog(GitHubRepo repo, int runId) async {
+    final headers = await _auth();
+    final jobsResp = await http.get(
+        Uri.parse(
+            'https://api.github.com/repos/${repo.owner}/${repo.name}/actions/runs/$runId/jobs'),
+        headers: headers);
+    if (jobsResp.statusCode != 200) throw GitHubException(_error(jobsResp));
+    final jobs = (jsonDecode(jobsResp.body) as Map)['jobs'] as List;
+    Map? failed;
+    for (final j in jobs) {
+      if ((j as Map)['conclusion'] == 'failure') {
+        failed = j;
+        break;
+      }
+    }
+    failed ??= jobs.isEmpty ? null : jobs.first as Map;
+    if (failed == null) return 'No jobs found for this run.';
+    final jobId = failed['id'] as int;
+    final logResp = await http
+        .get(Uri.parse(
+            'https://api.github.com/repos/${repo.owner}/${repo.name}/actions/jobs/$jobId/logs'),
+            headers: headers)
+        .timeout(const Duration(seconds: 60));
+    if (logResp.statusCode != 200) {
+      return 'Could not download the log (HTTP ${logResp.statusCode}).';
+    }
+    var log = logResp.body;
+    if (log.length > 6000) {
+      // Keep the tail — errors are usually at the end of a build log.
+      log = '… (log truncated)…${log.substring(log.length - 6000)}';
+    }
+    return log;
+  }
+
+  /// Clone a repository into a new local project via the ZIP endpoint.
+  Future<String> cloneRepo(GitHubRepo repo, ProjectService projects,
+      {String? branch}) async {
+    final headers = await _auth();
+    final ref = branch ?? repo.defaultBranch;
+    final response = await http
+        .get(
+            Uri.parse(
+                'https://api.github.com/repos/${repo.owner}/${repo.name}/zipball/${Uri.encodeComponent(ref)}'),
+            headers: headers)
+        .timeout(const Duration(seconds: 120));
+    if (response.statusCode != 200) throw GitHubException(_error(response));
+    final temp = await getTemporaryDirectory();
+    final zip = File(p.join(temp.path, '${repo.owner}_${repo.name}_$ref.zip'));
+    await zip.writeAsBytes(response.bodyBytes, flush: true);
+    final message = await projects.importZip(zip.path, name: repo.name);
+    // Remember which remote this project came from (for push/PR later).
+    await projects.updateManifest({
+      'gitRepository': repo.fullName,
+      'gitBranch': ref,
+    });
+    return message;
   }
 }
 

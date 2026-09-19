@@ -74,7 +74,7 @@ class SearchHit {
 
 /// A chat message in the agent conversation.
 class ChatMessage {
-  final String role; // user | assistant | system
+  final String role; // user | assistant | system | tool
   final String content;
   final bool isError;
 
@@ -86,12 +86,21 @@ class ChatMessage {
   /// Whether this message carried an image (persisted for display).
   final bool hasImage;
 
+  /// For assistant messages that requested tool calls (agent loop):
+  /// the raw OpenAI tool_calls array to echo back to the provider.
+  final List<Map<String, dynamic>>? toolCalls;
+
+  /// For role=tool messages: the tool_call_id this result answers.
+  final String? toolCallId;
+
   const ChatMessage({
     required this.role,
     required this.content,
     this.isError = false,
     this.imageDataUrl,
     this.hasImage = false,
+    this.toolCalls,
+    this.toolCallId,
   });
 
   Map<String, dynamic> toJson() => {
@@ -149,4 +158,53 @@ class DiffLine {
   final String text;
 
   const DiffLine(this.type, this.text);
+}
+
+// ------------------------------------------------------------------
+// Autonomous agent models
+// ------------------------------------------------------------------
+
+/// How autonomous the agent is allowed to be.
+enum AgentMode {
+  /// Inspect, edit, run commands, fix errors, and commit without asking.
+  auto,
+
+  /// Inspect and plan freely; every file modification asks first.
+  askBeforeChanges,
+
+  /// Produce a plan only — no edits, no commands.
+  planOnly,
+}
+
+/// Status of a single agent activity step (drives the live activity panel).
+enum AgentStepStatus { pending, running, done, failed }
+
+/// One real agent action. Every panel row corresponds to an executed tool —
+/// the UI never fabricates activity.
+class AgentStep {
+  final String id;
+  final String title; // short human label, e.g. "Searching code"
+  final String tool; // tool name executed
+  final Map<String, dynamic> args; // tool arguments
+  AgentStepStatus status;
+  String? detail; // command output / error / file summary
+  bool expanded; // UI toggle
+
+  AgentStep({
+    required this.id,
+    required this.title,
+    required this.tool,
+    this.args = const {},
+    this.status = AgentStepStatus.pending,
+    this.detail,
+    this.expanded = false,
+  });
+}
+
+/// One file change reported by `git_status`.
+class GitFileChange {
+  final String path;
+  final String status; // M | A | D | ?
+
+  const GitFileChange(this.path, this.status);
 }

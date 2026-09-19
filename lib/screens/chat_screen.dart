@@ -4,6 +4,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../agent_loop.dart';
 import '../agent_service.dart';
 import '../api_client.dart';
 import '../github_service.dart';
@@ -13,6 +14,8 @@ import '../pdf_text.dart';
 import '../project_service.dart';
 import '../stores.dart';
 import '../theme.dart';
+import '../tool_registry.dart';
+import '../widgets/agent_activity_panel.dart';
 import 'preview_screen.dart';
 
 /// AI Coding Chat screen: command bar + streaming chat + confirm/diff flow.
@@ -42,6 +45,19 @@ class _ChatScreenState extends State<ChatScreen> {
   // Image attached in-chat (base64 data URL) — sent via vision format.
   String? _pendingImage;
   String? _pendingImageName;
+
+  // ---- autonomous agent state ----
+  bool _agentMode = true; // agent loop vs plain chat
+  AgentMode _approvalMode = AgentMode.auto;
+  AgentLoop? _activeLoop;
+  final List<AgentStep> _agentSteps = [];
+  String? _agentThought;
+  StreamSubscription<AgentEvent>? _eventSub;
+  StreamSubscription<AgentThought>? _thoughtSub;
+  StreamSubscription<AgentApprovalNeeded>? _approvalSub;
+
+  static String _approvalKey(String tool, Map<String, dynamic> args) =>
+      '$tool:${args['path'] ?? args['name'] ?? ''}';
 
   static const _imageExtensions = ['png', 'jpg', 'jpeg', 'webp', 'gif'];
 
@@ -143,6 +159,19 @@ class _ChatScreenState extends State<ChatScreen> {
 
   bool get _hasPendingAttachment =>
       _pendingAttachment != null || _pendingImage != null;
+
+  @override
+  void dispose() {
+    // Leaving the screen mid-task must stop the loop and any pending
+    // approval wait — no background polling, no orphaned completers.
+    _activeLoop?.cancel();
+    _eventSub?.cancel();
+    _thoughtSub?.cancel();
+    _approvalSub?.cancel();
+    _input.dispose();
+    _scroll.dispose();
+    super.dispose();
+  }
 
   @override
   void initState() {
@@ -341,6 +370,7 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _send() async {
     final text = _input.text.trim();
     if (text.isEmpty || _busy) return;
+    if (_agentMode) return _agentSend(text);
     final image = _pendingImage;
     setState(() {
       _messages.add(ChatMessage(
@@ -431,6 +461,173 @@ class _ChatScreenState extends State<ChatScreen> {
     _scrollDown();
   }
 
+  // ==================================================================
+  // Autonomous agent flow
+  // ==================================================================
+
+  Future<void> _agentSend(String text) async {
+    final image = _pendingImage;
+    setState(() {
+      _messages.add(ChatMessage(
+        role: 'user',
+        content: text,
+        imageDataUrl: image,
+        hasImage: image != null,
+      ));
+      _busy = true;
+      _agentSteps.clear();
+      _agentThought = null;
+      _pendingImage = null;
+      _pendingImageName = null;
+    });
+    _input.clear();
+
+    var effectiveRequest = text;
+    final attachmentContent = _pendingAttachment;
+    final attachmentName = _pendingAttachmentName;
+    if (attachmentContent != null) {
+      final clipped = attachmentContent.length > 12000
+          ? '${attachmentContent.substring(0, 12000)}\n… (truncated)'
+          : attachmentContent;
+      effectiveRequest = '$text\n\n(Attached file "$attachmentName":\n$clipped\n)';
+      setState(() {
+        _pendingAttachment = null;
+        _pendingAttachmentName = null;
+      });
+    }
+
+    final loop = AgentLoop(
+      backend: apiClient,
+      registry: ToolRegistry(
+        projects: projectService,
+        github: githubService,
+        repoStore: githubProjectStore,
+      ),
+      projects: projectService,
+      mode: _approvalMode,
+      maxRounds: 10,
+    );
+    _activeLoop = loop;
+
+    _eventSub = loop.events.listen((e) {
+      if (!mounted) return;
+      setState(() {
+        if (e is StepStarted) {
+          _agentSteps.add(e.step);
+        } else if (e is StepFinished) {
+          final i = _agentSteps.indexWhere((s) => s.id == e.step.id);
+          if (i >= 0) _agentSteps[i] = e.step;
+        }
+      });
+      _scrollDown();
+    });
+    _thoughtSub = loop.thoughts.listen((t) {
+      if (!mounted) return;
+      setState(() => _agentThought = t.text);
+    });
+    _approvalSub = loop.approvals.listen((a) async {
+      final approved = await _askApproval(a.tool, a.args);
+      loop.resolveApproval(a.tool, _approvalKey(a.tool, a.args), approved);
+    });
+
+    try {
+      final prior = _messages.length > 10
+          ? _messages.sublist(_messages.length - 10)
+          : _messages;
+      final reply = await loop.run(
+        effectiveRequest,
+        priorHistory: prior.sublist(0, prior.length - 1), // exclude this turn
+      );
+      if (!mounted) return;
+      setState(() {
+        _messages.add(ChatMessage(
+          role: 'assistant',
+          content: reply.isEmpty
+              ? '(agent finished without a summary)'
+              : reply,
+        ));
+        _agentThought = null;
+      });
+      _scrollDown();
+      await _saveSession();
+    } on ApiException catch (e) {
+      _push('system', e.message, isError: true);
+    } catch (e) {
+      _push('system', 'Agent error: $e', isError: true);
+    } finally {
+      _eventSub?.cancel();
+      _thoughtSub?.cancel();
+      _approvalSub?.cancel();
+      _eventSub = null;
+      _thoughtSub = null;
+      _approvalSub = null;
+      _activeLoop = null;
+      if (mounted) {
+        setState(() {
+          _busy = false;
+          _agentThought = null;
+        });
+      }
+      _scrollDown();
+    }
+  }
+
+  Future<bool> _askApproval(String tool, Map<String, dynamic> args) async {
+    if (!mounted) return false;
+    final target = (args['path'] ?? args['name'] ?? args['command'] ?? '') as String;
+    final result = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppTheme.surface2,
+        title: Text('Allow $tool?', style: const TextStyle(fontSize: 17)),
+        content: Text(
+          'The agent wants to run "$tool" on:\n$target',
+          style: const TextStyle(color: AppTheme.muted, fontSize: 13),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Deny'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Allow'),
+          ),
+        ],
+      ),
+    );
+    return result == true;
+  }
+
+  void _cancelAgent() {
+    _activeLoop?.cancel();
+  }
+
+  void _cycleApprovalMode() {
+    setState(() {
+      _approvalMode = switch (_approvalMode) {
+        AgentMode.auto => AgentMode.askBeforeChanges,
+        AgentMode.askBeforeChanges => AgentMode.planOnly,
+        AgentMode.planOnly => AgentMode.auto,
+      };
+    });
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(switch (_approvalMode) {
+        AgentMode.auto => 'Agent mode: AUTO — edits and commits run without asking.',
+        AgentMode.askBeforeChanges => 'Agent mode: ASK — every file change needs your approval.',
+        AgentMode.planOnly => 'Agent mode: PLAN ONLY — analysis without modifications.',
+      }),
+      duration: const Duration(seconds: 2),
+    ));
+  }
+
+  String get _modeLabel => switch (_approvalMode) {
+        AgentMode.auto => 'AUTO',
+        AgentMode.askBeforeChanges => 'ASK',
+        AgentMode.planOnly => 'PLAN',
+      };
+
   void _scrollDown() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_scroll.hasClients) _scroll.animateTo(_scroll.position.maxScrollExtent, duration: const Duration(milliseconds: 250), curve: Curves.easeOut);
@@ -512,12 +709,19 @@ class _ChatScreenState extends State<ChatScreen> {
             children: [
               if (_messages.isEmpty)
                 Text(projectService.projectName == null
-                    ? 'Ask anything about coding, architecture, APIs, debugging, or how to build your app.\n\nImport a project or connect GitHub when you want CodePilot to inspect and edit files.\n\n📎 Attach images or code files with the paperclip.'
-                    : 'Ask things like:\n• Explain this project\n• Where is the API configured?\n• Fix the Flutter build error\n• Create a new screen\n\n📎 Attach images or files with the paperclip.',
+                    ? 'Agent mode is ON: give a task like "Fix the login screen and commit".\n\nNo project is open yet — import one with Home → File (ZIP) or Integrations → GitHub.\n\nTap AUTO to switch approval modes; tap ✦ to toggle plain chat.'
+                    : 'Agent mode is ON. Examples:\n• "Find and fix the deprecated API in the search screen, then commit"\n• "Add a dark-mode toggle to settings and open a PR"\n• Tap AUTO to switch approval modes · ✦ for plain chat.',
                     style: TextStyle(color: AppTheme.muted)),
               for (final m in _messages) _bubble(m),
+              if (_agentSteps.isNotEmpty)
+                AgentActivityPanel(
+                  steps: _agentSteps,
+                  currentThought: _agentThought,
+                  onCancel: _busy ? _cancelAgent : null,
+                ),
               if (_streamBuf != null) _bubble(ChatMessage(role: 'assistant', content: '$_streamBuf▍')),
-              if (_busy && _streamBuf == null) const Padding(padding: EdgeInsets.all(8), child: Center(child: CircularProgressIndicator())),
+              if (_busy && _streamBuf == null && _agentSteps.isEmpty)
+                const Padding(padding: EdgeInsets.all(8), child: Center(child: CircularProgressIndicator())),
               for (var i = 0; i < _pending.length; i++) _pendingCard(i),
             ],
           ),
@@ -564,8 +768,12 @@ class _ChatScreenState extends State<ChatScreen> {
                     onSubmitted: (_) => _send(),
                     style: const TextStyle(color: AppTheme.text),
                     cursorColor: AppTheme.glowAccent,
-                    decoration: const InputDecoration(
-                      hintText: 'Ask or request a change…',
+                    decoration: InputDecoration(
+                      hintText: _agentMode
+                          ? (projectService.projectName == null
+                              ? 'No project open — import one, or just ask…'
+                              : 'Give the agent a task…')
+                      : 'Ask or request a change…',
                     ),
                   ),
                 ),
@@ -573,6 +781,54 @@ class _ChatScreenState extends State<ChatScreen> {
                 IconButton.filled(
                   onPressed: _busy ? null : _send,
                   icon: const Icon(Icons.arrow_upward),
+                ),
+              ]),
+              const SizedBox(height: 2),
+              Row(children: [
+                // Agent toggle (✦ = autonomous agent on).
+                InkWell(
+                  borderRadius: BorderRadius.circular(10),
+                  onTap: () => setState(() => _agentMode = !_agentMode),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                    child: Row(mainAxisSize: MainAxisSize.min, children: [
+                      Icon(Icons.auto_awesome,
+                          size: 14,
+                          color: _agentMode ? AppTheme.glowAccent : AppTheme.muted),
+                      const SizedBox(width: 4),
+                      Text('Agent',
+                          style: TextStyle(
+                              fontSize: 11,
+                              color: _agentMode ? AppTheme.glowAccent : AppTheme.muted,
+                              fontWeight: _agentMode ? FontWeight.w600 : FontWeight.w400)),
+                    ]),
+                  ),
+                ),
+                // Approval-mode chip (visible in agent mode).
+                if (_agentMode)
+                  InkWell(
+                    borderRadius: BorderRadius.circular(10),
+                    onTap: _busy ? null : _cycleApprovalMode,
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                      child: Row(mainAxisSize: MainAxisSize.min, children: [
+                        Icon(switch (_approvalMode) {
+                          AgentMode.auto => Icons.bolt,
+                          AgentMode.askBeforeChanges => Icons.help_outline,
+                          AgentMode.planOnly => Icons.plagiarism_outlined,
+                        }, size: 14, color: AppTheme.muted),
+                        const SizedBox(width: 4),
+                        Text(_modeLabel,
+                            style: const TextStyle(fontSize: 11, color: AppTheme.muted)),
+                      ]),
+                    ),
+                  ),
+                const Spacer(),
+                Text(
+                  projectService.projectName == null
+                      ? 'no project'
+                      : '${projectService.projectName}',
+                  style: const TextStyle(color: AppTheme.muted, fontSize: 10.5),
                 ),
               ]),
             ]),

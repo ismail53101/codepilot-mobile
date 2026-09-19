@@ -7,10 +7,19 @@ import 'package:http/http.dart' as http;
 import 'models.dart';
 import 'stores.dart';
 
+/// Minimal interface the agent loop depends on — lets tests drive the loop
+/// with a fake backend (no network).
+abstract class ChatBackend {
+  Future<({String content, List<ToolCall> toolCalls})> chatWithTools(
+      List<ChatMessage> messages,
+      {List<Map<String, dynamic>>? tools,
+      int? timeoutSeconds});
+}
+
 /// OpenAI-compatible client: /chat/completions (+SSE streaming) and /models.
 /// The API key is fetched from SecureStore per call and ONLY placed in the
 /// Authorization header — never in bodies, logs, or error strings.
-class ApiClient {
+class ApiClient implements ChatBackend {
   static const _maxAttempts = 3;
   static const _retryCap = Duration(seconds: 30);
   final SettingsStore _store;
@@ -59,7 +68,19 @@ class ApiClient {
 
     return {
       'model': s.modelId,
-      'messages': [for (final m in messages) {'role': m.role, 'content': messageContent(m)}],
+      'messages': [
+        for (final m in messages)
+          {
+            'role': m.role,
+            'content': messageContent(m),
+            // Agent loop: echo assistant tool_calls and tool results in the
+            // OpenAI format so providers that support tool calling can
+            // continue the conversation correctly.
+            if (m.role == 'assistant' && (m.toolCalls?.isNotEmpty ?? false))
+              'tool_calls': m.toolCalls,
+            if (m.role == 'tool' && m.toolCallId != null) 'tool_call_id': m.toolCallId,
+          },
+      ],
       'temperature': 0.2,
       'stream': stream,
       if (tools != null) ...{'tools': tools, 'tool_choice': 'auto'},
@@ -69,6 +90,17 @@ class ApiClient {
   /// Non-streaming completion with retry/backoff on 429/5xx/network.
   Future<String> chat(List<ChatMessage> messages,
       {List<Map<String, dynamic>>? tools, int? timeoutSeconds}) async {
+    final m = await chatWithTools(messages, tools: tools, timeoutSeconds: timeoutSeconds);
+    return m.content;
+  }
+
+  /// Non-streaming completion that also returns OpenAI tool_calls so the
+  /// agent loop can execute tools. Falls back gracefully when the provider
+  /// omits tool support (content-only response).
+  Future<({String content, List<ToolCall> toolCalls})> chatWithTools(
+      List<ChatMessage> messages,
+      {List<Map<String, dynamic>>? tools,
+      int? timeoutSeconds}) async {
     final (s: s, key: key) = await _cfg();
     final timeout = Duration(seconds: timeoutSeconds ?? s.requestTimeout);
     final url = _uri(s, '/chat/completions');
@@ -86,7 +118,34 @@ class ApiClient {
             throw const ApiException('Provider returned an empty response.', 'provider');
           }
           final msg = (choices.first as Map)['message'] as Map;
-          return (msg['content'] as String?) ?? '';
+          final content = (msg['content'] as String?) ?? '';
+          final calls = <ToolCall>[];
+          final raw = msg['tool_calls'] as List?;
+          if (raw != null) {
+            for (final c in raw) {
+              if (c is! Map) continue;
+              final fn = c['function'] as Map?;
+              if (fn == null) continue;
+              final argsRaw = fn['arguments'];
+              Map<String, dynamic> args = {};
+              if (argsRaw is String) {
+                try {
+                  final decoded = jsonDecode(argsRaw);
+                  if (decoded is Map) args = Map<String, dynamic>.from(decoded);
+                } on FormatException {
+                  args = {'_raw': argsRaw}; // let the loop report the bad JSON
+                }
+              } else if (argsRaw is Map) {
+                args = Map<String, dynamic>.from(argsRaw);
+              }
+              calls.add(ToolCall(
+                id: (c['id'] as String?) ?? 'call_${calls.length}',
+                name: (fn['name'] as String?) ?? '',
+                arguments: args,
+              ));
+            }
+          }
+          return (content: content, toolCalls: calls);
         }
         throw _statusError(resp, s.modelId);
       } on TimeoutException {
@@ -213,6 +272,15 @@ class ApiClient {
 
 class _FakeResponse extends http.Response {
   _FakeResponse(int statusCode, String body) : super(body, statusCode);
+}
+
+/// One tool call requested by the model.
+class ToolCall {
+  final String id;
+  final String name;
+  final Map<String, dynamic> arguments;
+
+  const ToolCall({required this.id, required this.name, required this.arguments});
 }
 
 class ApiException implements Exception {
