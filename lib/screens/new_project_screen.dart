@@ -109,7 +109,7 @@ class _NewProjectScreenState extends State<NewProjectScreen> {
                     border: Border.all(color: AppTheme.border),
                   ),
                   child: Row(children: [
-                    Icon(Icons.info_outline,
+                    const Icon(Icons.info_outline,
                         size: 16, color: AppTheme.glowAccent),
                     const SizedBox(width: 8),
                     Expanded(
