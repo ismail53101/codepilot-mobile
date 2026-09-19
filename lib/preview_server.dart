@@ -1,10 +1,7 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 
 import 'package:path/path.dart' as p;
-
-import 'project_service.dart';
 
 /// Local HTTP static server bound to 127.0.0.1, serving ONE project's files.
 ///
