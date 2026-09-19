@@ -19,6 +19,8 @@ void main() {
     expect(find.text('Ask'), findsOneWidget);
     expect(find.text('Search'), findsOneWidget);
     expect(find.byIcon(Icons.arrow_upward), findsOneWidget);
+    // Prominent Create Project action in the header.
+    expect(find.text('Create Project'), findsOneWidget);
     // No project cards, quick-action grid, or recent-changes list on Home.
     expect(find.text('Import ZIP'), findsNothing);
     expect(find.text('Recent changes'), findsNothing);

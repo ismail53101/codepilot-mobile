@@ -170,6 +170,11 @@ class _ChatScreenState extends State<ChatScreen> {
   void dispose() {
     // Leaving the screen mid-task must stop the loop and any pending
     // approval wait — no background polling, no orphaned completers.
+    // Persist the thread FIRST so backing out mid-run never loses the task
+    // text (the post-run save can no longer happen once unmounted).
+    if (_messages.isNotEmpty) {
+      unawaited(_saveSession());
+    }
     _activeLoop?.cancel();
     _eventSub?.cancel();
     _thoughtSub?.cancel();
@@ -254,11 +259,16 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _saveSession() async {
     if (_messages.isEmpty) return;
-    await chatSessionStore.save(
+    // Adopt the id on first save so every later save updates the SAME
+    // session (immediate mid-run saves must not create duplicates).
+    final id = await chatSessionStore.save(
       existingId: _sessionId,
       title: _sessionTitle,
       messages: List.of(_messages),
     );
+    if (id.isNotEmpty && _sessionId == null) {
+      _sessionId = id;
+    }
   }
 
   Future<void> _openChatHistory() async {
@@ -391,6 +401,8 @@ class _ChatScreenState extends State<ChatScreen> {
       _pendingImageName = null;
     });
     _input.clear();
+    // Persist immediately (same mid-run-back-out protection as agent mode).
+    unawaited(_saveSession());
 
     // Inject attached file content (from Home or the chat paperclip) once.
     var effectiveRequest = text;
@@ -490,6 +502,9 @@ class _ChatScreenState extends State<ChatScreen> {
       _pendingImageName = null;
     });
     _input.clear();
+    // Persist the task text IMMEDIATELY — backing out mid-run must not
+    // erase it (the final save only happens if the run completes on-screen).
+    unawaited(_saveSession());
 
     var effectiveRequest = text;
     final attachmentContent = _pendingAttachment;

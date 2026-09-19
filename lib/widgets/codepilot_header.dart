@@ -4,16 +4,19 @@ import '../theme.dart';
 import 'overflow_menu.dart';
 
 /// CodePilot wordmark header: "Code" in light gray/white, "Pilot" in the
-/// electric-blue accent, plus a circular 3-dot overflow button on the right.
-/// Tapping the button opens the [OverflowMenu] directly beneath it.
+/// electric-blue accent, a prominent Create Project action, and a circular
+/// 3-dot overflow button on the right. Tapping the button opens the
+/// [OverflowMenu] directly beneath it.
 class CodePilotHeader extends StatelessWidget {
   final List<OverflowMenuItem> menuItems;
   final ValueChanged<String> onMenuSelected;
+  final VoidCallback? onCreateProject;
 
   const CodePilotHeader({
     super.key,
     required this.menuItems,
     required this.onMenuSelected,
+    this.onCreateProject,
   });
 
   @override
@@ -47,6 +50,31 @@ class CodePilotHeader extends StatelessWidget {
           key: ValueKey('codepilot_wordmark'),
         ),
         const Spacer(),
+        if (onCreateProject != null)
+          // Flexible + FittedBox: shrinks instead of overflowing on small
+          // phones where wordmark + action + menu exceed the width.
+          Flexible(
+            child: GestureDetector(
+              onTap: onCreateProject,
+              behavior: HitTestBehavior.opaque,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  const Icon(Icons.add_circle_outline,
+                      size: 18, color: AppTheme.text),
+                  const SizedBox(width: 6),
+                  FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: const Text('Create Project',
+                        style: TextStyle(
+                            color: AppTheme.text,
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600)),
+                  ),
+                ]),
+              ),
+            ),
+          ),
         // Builder context = the button itself, so the popup anchors here.
         Builder(
           builder: (buttonContext) => IconButton(

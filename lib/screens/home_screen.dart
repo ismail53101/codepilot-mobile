@@ -185,6 +185,7 @@ class _HomeScreenState extends State<HomeScreen> {
           CodePilotHeader(
             menuItems: _menuItems,
             onMenuSelected: _onMenuSelected,
+            onCreateProject: () => Navigator.pushNamed(context, '/new-project'),
           ),
           // Large intentionally empty workspace.
           const Expanded(child: SizedBox.shrink()),

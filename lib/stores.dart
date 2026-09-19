@@ -265,9 +265,12 @@ class ChatSessionStore {
 
   /// Adds or updates a session (newest first, capped). Returns nothing;
   /// callers re-read via [load] when they need the list.
-  Future<void> save({required String? existingId, required String title, required List<ChatMessage> messages}) async {
-    if (messages.isEmpty) return;
-    final id = existingId ?? DateTime.now().microsecondsSinceEpoch.toString();
+  /// Adds or updates a session (newest first, capped). Returns the id of
+  /// the stored session so first-time callers can adopt it and keep
+  /// updating the SAME session on subsequent saves (no duplicates when a
+  /// thread is persisted mid-run).
+  Future<String> save({required String? existingId, required String title, required List<ChatMessage> messages}) async {
+    if (messages.isEmpty) return existingId ?? '';
     // Mutable copy — load() is documented mutable, but copy defensively so
     // future refactors can never reintroduce unmodifiable-list mutations.
     final sessions = List<ChatSession>.of(await load());
@@ -293,6 +296,7 @@ class ChatSessionStore {
     ]);
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_kSessions, encoded);
+    return id;
   }
 
   Future<void> remove(String id) async {
