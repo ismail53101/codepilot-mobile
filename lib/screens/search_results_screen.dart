@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../main.dart';
 import '../models.dart';
 import '../project_service.dart';
+import '../stores.dart';
 import '../theme.dart';
 
 /// General Search searches saved conversations. File search is available only

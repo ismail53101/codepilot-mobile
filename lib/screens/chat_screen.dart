@@ -327,12 +327,13 @@ class _ChatScreenState extends State<ChatScreen> {
       }
       if (!mounted) return;
       if (chosen != null) {
+        final selected = chosen;
         setState(() {
           _restored = true;
-          _agentMode = chosen.isProject;
-          _sessionId = chosen.id;
-          _messages.addAll(chosen.messages);
-          _restoreActivity(chosen.activity);
+          _agentMode = selected.isProject;
+          _sessionId = selected.id;
+          _messages.addAll(selected.messages);
+          _restoreActivity(selected.activity);
         });
       }
     } else if (fresh) {
