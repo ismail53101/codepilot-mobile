@@ -1365,7 +1365,10 @@ class _ChatScreenState extends State<ChatScreen> {
                     Flexible(child: Text(m.attachmentName!, overflow: TextOverflow.ellipsis, style: const TextStyle(color: AppTheme.glowAccent, fontSize: 12))),
                   ]),
                 ),
-              SelectableText(m.content, style: TextStyle(color: m.isError ? AppTheme.err : AppTheme.text)),
+              _ExpandableUserMessage(
+                content: m.content,
+                color: m.isError ? AppTheme.err : AppTheme.text,
+              ),
             ]))
           else
             _AssistantBody(content: m.content, isError: m.isError),
@@ -1386,6 +1389,59 @@ class _ChatScreenState extends State<ChatScreen> {
         trailing: FilledButton(child: const Text('Review diff'), onPressed: () => _openDiff(i)),
       ),
     );
+  }
+}
+
+/// Visual-only collapsing for long user messages. The complete [content]
+/// remains in the ChatMessage and is still sent to/persisted by the model;
+/// only this presentation starts collapsed when reopened.
+class _ExpandableUserMessage extends StatefulWidget {
+  final String content;
+  final Color color;
+
+  const _ExpandableUserMessage({required this.content, required this.color});
+
+  @override
+  State<_ExpandableUserMessage> createState() => _ExpandableUserMessageState();
+}
+
+class _ExpandableUserMessageState extends State<_ExpandableUserMessage> {
+  static const _maxCollapsedLines = 5;
+  static const _longMessageCharacters = 900;
+  bool _expanded = false;
+
+  bool get _isLong {
+    final lines = '\n'.allMatches(widget.content).length + 1;
+    return lines > _maxCollapsedLines || widget.content.length > _longMessageCharacters;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final text = SelectableText(
+      widget.content,
+      maxLines: !_isLong || _expanded ? null : _maxCollapsedLines,
+      style: TextStyle(color: widget.color),
+    );
+    if (!_isLong) return text;
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      text,
+      const SizedBox(height: 4),
+      InkWell(
+        onTap: () => setState(() => _expanded = !_expanded),
+        borderRadius: BorderRadius.circular(6),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 3),
+          child: Text(
+            _expanded ? 'Show less' : 'Show more',
+            style: const TextStyle(
+              color: AppTheme.glowAccent,
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+      ),
+    ]);
   }
 }
 

@@ -19,13 +19,14 @@ class FileAttachmentButton extends StatelessWidget {
     this.compact = false,
   });
 
-  /// Code/project file extensions commonly attached to prompts.
+  /// Common prompt attachments, including documents and images.
   static const _codeExtensions = [
     'zip', // full project archives
     'dart', 'kt', 'java', 'swift', 'm', 'mm', 'h', 'c', 'cpp', 'cs', 'go',
     'rs', 'rb', 'php', 'py', 'js', 'jsx', 'ts', 'tsx', 'json', 'yaml', 'yml',
     'xml', 'html', 'css', 'scss', 'sql', 'sh', 'bat', 'gradle', 'properties',
-    'toml', 'md', 'txt', 'csv', 'lock',
+    'toml', 'md', 'txt', 'csv', 'lock', 'pdf', 'doc', 'docx', 'rtf',
+    'png', 'jpg', 'jpeg', 'webp', 'gif',
   ];
 
   Future<void> _pick() async {
