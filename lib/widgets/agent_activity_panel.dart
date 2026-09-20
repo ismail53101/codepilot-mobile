@@ -512,7 +512,7 @@ class _AgentActivityPanelState extends State<AgentActivityPanel> {
                           fontSize: 11,
                           fontFamily: 'monospace')),
                   const SizedBox(width: 6),
-                  const Text('$',
+                  const Text(r'$',
                       style: TextStyle(
                           color: AppTheme.text,
                           fontSize: 11.5,
