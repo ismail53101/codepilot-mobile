@@ -14,6 +14,7 @@ class Integration {
   final String subtitle;
   final IconData icon;
   final Color accent;
+  final bool available;
 
   const Integration({
     required this.id,
@@ -21,6 +22,7 @@ class Integration {
     required this.subtitle,
     required this.icon,
     this.accent = AppTheme.glowAccent,
+    this.available = false,
   });
 
   /// Const icon palette for persisted integrations. Restoring icons from
@@ -54,6 +56,7 @@ class Integration {
       subtitle: (j['subtitle'] as String?) ?? '',
       icon: icon,
       accent: Color(j['accentValue'] as int? ?? AppTheme.glowAccent.value),
+      available: j['available'] as bool? ?? false,
     );
   }
 
@@ -63,6 +66,7 @@ class Integration {
         'subtitle': subtitle,
         'iconCode': icon.codePoint,
         'accentValue': accent.value,
+        'available': available,
       };
 }
 
@@ -85,11 +89,12 @@ class IntegrationManager extends ChangeNotifier {
       name: 'GitHub',
       subtitle: 'Repositories, pull requests, and issues',
       icon: Icons.code,
+      available: true,
     ),
     Integration(
       id: 'gitlab',
       name: 'GitLab',
-      subtitle: 'GitLab.com and self-managed projects',
+      subtitle: 'GitLab.com and self-managed repositories',
       icon: Icons.account_tree_outlined,
     ),
     Integration(
@@ -101,13 +106,13 @@ class IntegrationManager extends ChangeNotifier {
     Integration(
       id: 'gdrive',
       name: 'Google Drive',
-      subtitle: 'Import and export project archives',
+      subtitle: 'Import and export project files',
       icon: Icons.cloud_outlined,
     ),
     Integration(
       id: 'dropbox',
       name: 'Dropbox',
-      subtitle: 'Sync project files with your Dropbox',
+      subtitle: 'Sync project files with your cloud storage',
       icon: Icons.upload_file,
     ),
   ];
@@ -116,7 +121,7 @@ class IntegrationManager extends ChangeNotifier {
   final List<Integration> _custom = [];
 
   Set<String> get connectedIds => Set.unmodifiable(_connected);
-  bool isConnected(String id) => _connected.contains(id);
+  bool isConnected(String id) => id == 'github' && _connected.contains(id);
 
   /// All entries: built-in catalog followed by user-defined integrations.
   List<Integration> get all => [...catalog, ..._custom];
@@ -138,6 +143,7 @@ class IntegrationManager extends ChangeNotifier {
   }
 
   Future<void> setConnected(String id, bool value) async {
+    if (id != 'github') return;
     if (value) {
       _connected.add(id);
     } else {
@@ -156,6 +162,7 @@ class IntegrationManager extends ChangeNotifier {
       name: name.trim(),
       subtitle: 'Custom integration',
       icon: Icons.extension,
+      available: false,
     );
     if (_custom.any((c) => c.id == id)) return entry;
     _custom.add(entry);
@@ -171,7 +178,7 @@ class IntegrationManager extends ChangeNotifier {
 class IntegrationCard extends StatelessWidget {
   final Integration integration;
   final bool connected;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
 
   const IntegrationCard({
     super.key,
@@ -226,9 +233,9 @@ class IntegrationCard extends StatelessWidget {
                 border: Border.all(color: connected ? AppTheme.glowAccent : AppTheme.border),
               ),
               child: Text(
-                connected ? 'Connected' : 'Connect',
+                connected ? 'Connected' : integration.available ? 'Connect' : 'Coming Soon',
                 style: TextStyle(
-                  color: connected ? AppTheme.glowAccent : AppTheme.muted,
+                  color: connected ? AppTheme.glowAccent : integration.available ? AppTheme.glowAccent : AppTheme.muted,
                   fontSize: 12,
                   fontWeight: FontWeight.w600,
                 ),

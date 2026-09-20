@@ -40,7 +40,7 @@ class _IntegrationsScreenState extends State<IntegrationsScreen> {
                 IntegrationCard(
                   integration: integration,
                   connected: integrationManager.isConnected(integration.id),
-                  onTap: () => _toggle(integration),
+                  onTap: integration.available ? () => _toggle(integration) : null,
                 ),
                 const SizedBox(height: 10),
               ],
@@ -67,6 +67,7 @@ class _IntegrationsScreenState extends State<IntegrationsScreen> {
   }
 
   Future<void> _toggle(Integration integration) async {
+    if (!integration.available) return;
     if (integration.id == 'github') {
       // GitHub has a real flow (OAuth device flow) in this app already.
       if (!mounted) return;
