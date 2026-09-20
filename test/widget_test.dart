@@ -82,12 +82,18 @@ void main() {
     expect(find.text('New Project'), findsOneWidget);
     expect(find.text('Choose a template'), findsOneWidget);
 
-    // Back to Home, then the gold key opens the Custom API Provider screen.
+    // Back to Home, then the gold key opens the API Key Manager — the
+    // central multi-provider/key screen (routing + fallback + masked keys).
+    // The legacy single-provider screen stays reachable from there via the
+    // tune (advanced settings) action.
     await tester.pageBack();
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(apiKeyButtonKey));
     await tester.pumpAndSettle();
-    expect(find.text('Custom API Provider'), findsOneWidget);
+    expect(find.text('API Keys & Providers'), findsOneWidget);
+    expect(find.text('Routing'), findsOneWidget);
+    expect(find.text('Automatic'), findsOneWidget);
+    expect(find.text('Manual'), findsOneWidget);
   });
 
   testWidgets('typing a command shows the composer input', (tester) async {
