@@ -158,11 +158,17 @@ class ProviderRouter implements ChatBackend {
       if (cancelToken?.isCancelled ?? false) {
         throw const ApiException('Cancelled.', 'cancelled');
       }
-      if (backend is! StreamingBackend) continue; // e.g. Anthropic → non-stream
+      // e.g. Anthropic → non-stream fallback below.
+      final StreamingBackend? streaming =
+          backend is StreamingBackend ? backend : null;
+      if (streaming == null) continue;
       var streamed = false;
       try {
-        await for (final piece
-            in backend.chatStream(messages, timeoutSeconds: timeoutSeconds, cancelToken: cancelToken)) {
+        await for (final piece in streaming.chatStream(
+          messages,
+          timeoutSeconds: timeoutSeconds,
+          cancelToken: cancelToken,
+        )) {
           streamed = true;
           yield piece;
         }

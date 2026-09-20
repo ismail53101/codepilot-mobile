@@ -7,6 +7,7 @@ import 'project_service.dart';
 import 'providers/provider_router.dart';
 import 'providers/provider_store.dart';
 import 'screens/api_key_manager_screen.dart';
+import 'screens/api_settings_screen.dart';
 import 'screens/build_logs_screen.dart';
 import 'screens/change_diff_screen.dart';
 import 'screens/chat_screen.dart';

@@ -140,19 +140,19 @@ Future<http.StreamedResponse> _postStream(
     }
     return resp;
   } on TimeoutException {
-    await client.close();
+    client.close();
     throw ApiException('Stream timed out after ${timeoutSeconds}s.', 'timeout');
   } on SocketException catch (e) {
-    await client.close();
+    client.close();
     throw ApiException('Network error: ${e.message}', 'network');
   } on http.ClientException catch (e) {
-    await client.close();
+    client.close();
     if (cancelToken?.isCancelled ?? false) {
       throw const ApiException('Cancelled.', 'cancelled');
     }
     throw ApiException('Network error: ${e.message}', 'network');
   } catch (e) {
-    await client.close();
+    client.close();
     rethrow;
   }
 }

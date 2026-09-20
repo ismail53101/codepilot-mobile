@@ -3,7 +3,6 @@ import 'package:flutter/material.dart';
 import '../providers/provider_backends.dart';
 import '../providers/provider_config.dart';
 import '../providers/provider_store.dart';
-import '../stores.dart';
 import '../theme.dart';
 import '../main.dart' show settingsStore;
 

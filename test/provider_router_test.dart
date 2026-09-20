@@ -33,7 +33,7 @@ class FakeBackend implements ChatBackend {
   }) async {
     calls++;
     if (failure != null) throw failure!;
-    return (content: 'ok-from-$tag', toolCalls: const []);
+    return (content: 'ok-from-$tag', toolCalls: const <ToolCall>[]);
   }
 }
 
