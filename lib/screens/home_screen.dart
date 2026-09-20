@@ -118,14 +118,14 @@ class _HomeScreenState extends State<HomeScreen> {
       _attachmentContent = null;
     });
 
-    // Explicit mode wins; Ask stays on chat. Search with no open project
-    // falls back to chat (nothing to search yet).
+    // Home Search always means conversation search. Project file search is
+    // available separately from Project Mode.
     final isSearch = _mode == ComposerMode.search;
-    if (isSearch && projectService.projectName != null) {
+    if (isSearch) {
       Navigator.pushNamed(
         context,
         '/search',
-        arguments: attachmentName == null ? text : '$attachmentName\n$text',
+        arguments: {'query': text},
       );
       _command.clear();
       return;

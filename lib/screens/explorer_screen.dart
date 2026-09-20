@@ -42,7 +42,7 @@ class _ExplorerScreenState extends State<ExplorerScreen> {
   void _runSearch() {
     final q = _search.text.trim();
     if (q.isEmpty) return;
-    Navigator.pushNamed(context, '/search', arguments: q);
+    Navigator.pushNamed(context, '/search', arguments: {'query': q, 'fileSearch': true});
   }
 
   @override
@@ -71,7 +71,7 @@ class _ExplorerScreenState extends State<ExplorerScreen> {
                   Expanded(child: TextField(
                     controller: _search,
                     onSubmitted: (_) => _runSearch(),
-                    decoration: const InputDecoration(hintText: 'Search across the whole project…', isDense: true),
+                    decoration: const InputDecoration(hintText: 'Find in Project files…', isDense: true),
                   )),
                   IconButton(icon: const Icon(Icons.search, color: AppTheme.accent), onPressed: _runSearch),
                 ]),

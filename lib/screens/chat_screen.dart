@@ -198,16 +198,54 @@ class _ChatScreenState extends State<ChatScreen> {
   bool get _hasPendingAttachment =>
       _pendingAttachmentName != null || _pendingImage != null;
 
-  bool _looksLikeProjectAction(String text) {
-    final value = text.trim().toLowerCase();
-    return RegExp(r'^(code|project)$').hasMatch(value) ||
-        RegExp(r'\b(create|open|edit|continue|modify|build|import)\b.*\b(project|website|web app|page|files?|app)\b').hasMatch(value) ||
-        RegExp(r'\b(create|build)\b.*\b(html|css|javascript|login|e-commerce|store)\b').hasMatch(value);
-  }
-
-  void _setProjectMode(bool project) {
+  Future<void> _setProjectMode(bool project) async {
     if (_busy || _agentMode == project) return;
-    setState(() => _agentMode = project);
+    if (!project) {
+      setState(() => _agentMode = false);
+      return;
+    }
+    final projects = await projectService.listProjects();
+    if (!mounted) return;
+    if (projects.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No project selected. Create or open a project first.')),
+      );
+      return;
+    }
+    final chosen = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: AppTheme.navyPanel,
+      builder: (sheetContext) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            const ListTile(title: Text('Select project', style: TextStyle(fontWeight: FontWeight.w700))),
+            for (final name in projects)
+              ListTile(
+                leading: const Icon(Icons.folder_outlined, color: AppTheme.glowAccent),
+                title: Text(name),
+                onTap: () => Navigator.pop(sheetContext, name),
+              ),
+            ListTile(
+              leading: const Icon(Icons.add, color: AppTheme.accent),
+              title: const Text('Create Project'),
+              onTap: () {
+                Navigator.pop(sheetContext);
+                Navigator.pushNamed(context, '/new-project');
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+    if (!mounted || chosen == null) return;
+    try {
+      await projectService.openProject(chosen);
+      if (!mounted) return;
+      setState(() => _agentMode = true);
+    } on ProjectException catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
+    }
   }
 
   @override
@@ -248,15 +286,17 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void initState() {
     super.initState();
-    // Opening an existing project is an explicit project action; entering
-    // from Home without one always starts in normal Chat mode.
-    _agentMode = projectService.projectName != null;
+    // Chat is always the safe default. A project becomes conversation context
+    // only after the user explicitly switches mode and opens/selects it.
+    _agentMode = false;
     WidgetsBinding.instance.addPostFrameCallback((_) => _initFromRoute());
   }
 
   Future<void> _initFromRoute() async {
     if (!mounted) return;
     final arg = ModalRoute.of(context)?.settings.arguments;
+    final bool fresh = arg is Map && arg['fresh'] == true;
+    final String? requestedSessionId = arg is Map ? arg['sessionId'] as String? : null;
 
     // A query passed from the Home composer (or File Preview "Ask AI") is
     // the user's FIRST MESSAGE — send it immediately so there is exactly one
@@ -276,8 +316,26 @@ class _ChatScreenState extends State<ChatScreen> {
     }
 
     // Resume the most recent conversation silently (memory across restarts).
-    final bool fresh = arg is Map && arg['fresh'] == true;
-    if (fresh) {
+    if (requestedSessionId != null) {
+      final sessions = await chatSessionStore.load();
+      ChatSession? chosen;
+      for (final session in sessions) {
+        if (session.id == requestedSessionId) {
+          chosen = session;
+          break;
+        }
+      }
+      if (!mounted) return;
+      if (chosen != null) {
+        setState(() {
+          _restored = true;
+          _agentMode = chosen.isProject;
+          _sessionId = chosen.id;
+          _messages.addAll(chosen.messages);
+          _restoreActivity(chosen.activity);
+        });
+      }
+    } else if (fresh) {
       // Entering from Home: ALWAYS a brand-new conversation, like other
       // chatbots. A previously resumed thread is not lost — it stays in
       // the Chats history and is offered via the resume card below.
@@ -286,9 +344,13 @@ class _ChatScreenState extends State<ChatScreen> {
       setState(() {
         _restored = true;
         _sessionId = null;
+        _taskId = null;
+        _lastAgentRequest = null;
+        _resumeContext = null;
+        _agentMode = false;
         _messages.clear();
         _pending.clear();
-        _recentSessions = sessions.where((s) => s.isProject == _agentMode).take(3).toList();
+        _recentSessions = sessions.where((s) => !s.isProject).take(3).toList();
       });
     } else if (!_restored) {
       final sessions = await chatSessionStore.load();
@@ -557,13 +619,17 @@ class _ChatScreenState extends State<ChatScreen> {
       _messages.clear();
       _pending.clear();
       _sessionId = null;
+      _taskId = null;
+      _lastAgentRequest = null;
+      _resumeContext = null;
+      _agentMode = false;
       _timeline.clear();
       _taskStart = null;
       _taskEnd = null;
       _agentState = AgentTaskState.idle;
       _agentError = null;
     });
-    _push('system', 'New chat. The previous conversation is saved under Chats.');
+    _push('system', 'New chat. Chat Mode is active and no project is selected.');
   }
 
   /// Re-open the previous thread without losing the current one (it is
@@ -602,10 +668,6 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _send() async {
     final text = _input.text.trim();
     if (text.isEmpty || _busy) return;
-    if (!_agentMode && _looksLikeProjectAction(text)) {
-      setState(() => _agentMode = true);
-      _push('system', 'Project Mode enabled for this request.');
-    }
     if (_agentMode) return _agentSend(text);
     final image = _pendingImage;
     final attachmentName = _pendingAttachmentName ?? _pendingImageName;
@@ -1032,10 +1094,10 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text('Chat · ${projectService.projectName ?? 'general'}'), actions: [
+      appBar: AppBar(title: Text(_agentMode ? 'Project Chat' : 'Chat'), actions: [
         IconButton(icon: const Icon(Icons.chat_bubble_outline), tooltip: 'Chats (history)', onPressed: _openChatHistory),
         IconButton(icon: const Icon(Icons.add_comment_outlined), tooltip: 'New chat', onPressed: _busy ? null : _newChat),
-        if (projectService.projectName != null)
+        if (_agentMode && projectService.projectName != null)
           IconButton(
             icon: const Icon(Icons.download_outlined),
             tooltip: 'Download project as ZIP',
@@ -1164,7 +1226,7 @@ class _ChatScreenState extends State<ChatScreen> {
                     decoration: InputDecoration(
                       hintText: _agentMode
                           ? (projectService.projectName == null
-                              ? 'No project open — import one, or just ask…'
+                              ? 'No project selected — open one from Projects…'
                               : 'Give the agent a task…')
                       : 'Ask or request a change…',
                     ),
@@ -1218,7 +1280,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   ),
                 // ▶ Live preview of the open project — static web projects
                 // render fully on-device; unsupported types say so honestly.
-                if (projectService.projectName != null)
+                if (_agentMode && projectService.projectName != null)
                   InkWell(
                     borderRadius: BorderRadius.circular(10),
                     onTap: () => openProjectPreview(context),
@@ -1236,7 +1298,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   ),
                 const Spacer(),
                 Text(
-                  projectService.projectName == null
+                  !_agentMode || projectService.projectName == null
                       ? 'no project'
                       : '${projectService.projectName}',
                   style: const TextStyle(color: AppTheme.muted, fontSize: 10.5),
