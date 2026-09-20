@@ -158,9 +158,11 @@ class ProviderRouter implements ChatBackend {
       if (cancelToken?.isCancelled ?? false) {
         throw const ApiException('Cancelled.', 'cancelled');
       }
-      // e.g. Anthropic → non-stream fallback below.
-      StreamingBackend? streaming;
-      if (backend is StreamingBackend) streaming = backend;
+      // e.g. Anthropic → non-stream fallback below. (Destructured pattern
+      // variables don't type-promote, hence the explicit cast.)
+      final StreamingBackend? streaming = backend is StreamingBackend
+          ? backend as StreamingBackend
+          : null;
       if (streaming == null) continue;
       var streamed = false;
       try {
