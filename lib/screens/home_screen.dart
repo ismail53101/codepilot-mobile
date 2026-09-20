@@ -235,22 +235,22 @@ class _AmbientBackdrop extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return IgnorePointer(
-      child: Stack(fit: StackFit.expand, children: [
-        const DecoratedBox(
+      child: const Stack(fit: StackFit.expand, children: [
+        DecoratedBox(
           decoration: BoxDecoration(gradient: AppTheme.homeBackground),
         ),
         // Faint electric-blue haze rising behind the header (top-right).
-        const Align(
+        Align(
           alignment: Alignment(1.05, -0.9),
           child: _Glow(size: 320, opacity: .10),
         ),
         // Even fainter counter-glow on the left edge.
-        const Align(
+        Align(
           alignment: Alignment(-1.1, -0.35),
           child: _Glow(size: 260, opacity: .07),
         ),
         // Deep haze settling behind the composer.
-        const Align(
+        Align(
           alignment: Alignment(0.15, 1.08),
           child: _Glow(size: 360, opacity: .08),
         ),

@@ -344,10 +344,10 @@ List<AgentVerification> verificationFromSteps(List<AgentStep> steps) {
     final cmd = ((s.args['command'] as String?) ?? '').toLowerCase();
     if (cmd.isEmpty) continue;
     final detail = s.detail ?? '';
+    final nl = detail.indexOf('\n');
     final exit = detail.startsWith('exit=')
-        ? int.tryParse(detail.substring(5, detail.indexOf('\n') == -1
-                ? detail.length
-                : detail.indexOf('\n')).trim())
+        ? int.tryParse(
+            detail.substring(5, nl == -1 ? detail.length : nl).trim())
         : null;
     if (exit != 0) continue; // a failing check is not a verification pass
     String? label;
