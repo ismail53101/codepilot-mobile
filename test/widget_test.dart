@@ -1,9 +1,25 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:codepilot_mobile/main.dart';
+import 'package:codepilot_mobile/widgets/codepilot_header.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  setUp(() {
+    // In-memory prefs + a no-op secure-storage channel so screens opened by
+    // the tests (Custom API Provider) can load without real plugins.
+    SharedPreferences.setMockInitialValues({});
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+      const MethodChannel('plugins.it_nomads.com/flutter_secure_storage'),
+      (call) async => null,
+    );
+  });
+
   testWidgets('CodePilot app starts with minimal home screen', (tester) async {
     await tester.pumpWidget(const CodePilotApp());
     // The wordmark is rendered as a two-tone rich-text span.
@@ -19,8 +35,13 @@ void main() {
     expect(find.text('Ask'), findsOneWidget);
     expect(find.text('Search'), findsOneWidget);
     expect(find.byIcon(Icons.arrow_upward), findsOneWidget);
-    // Prominent Create Project action in the header.
-    expect(find.text('Create Project'), findsOneWidget);
+    // Compact header controls: Create Project (+), gold API-key, 3-dot menu.
+    expect(find.byKey(createButtonKey), findsOneWidget);
+    expect(find.byKey(apiKeyButtonKey), findsOneWidget);
+    expect(find.byKey(menuButtonKey), findsOneWidget);
+    expect(find.byIcon(Icons.add), findsOneWidget);
+    // No text label beside the plus icon (reference design).
+    expect(find.text('Create Project'), findsNothing);
     // No project cards, quick-action grid, or recent-changes list on Home.
     expect(find.text('Import ZIP'), findsNothing);
     expect(find.text('Recent changes'), findsNothing);
@@ -49,6 +70,24 @@ void main() {
     await tester.tapAt(const Offset(60, 400));
     await tester.pumpAndSettle();
     expect(find.text('App preferences'), findsNothing);
+  });
+
+  testWidgets('create-project and API-key header controls navigate',
+      (tester) async {
+    await tester.pumpWidget(const CodePilotApp());
+
+    // '+' opens the existing Create Project flow.
+    await tester.tap(find.byKey(createButtonKey));
+    await tester.pumpAndSettle();
+    expect(find.text('New Project'), findsOneWidget);
+    expect(find.text('Choose a template'), findsOneWidget);
+
+    // Back to Home, then the gold key opens the Custom API Provider screen.
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(apiKeyButtonKey));
+    await tester.pumpAndSettle();
+    expect(find.text('Custom API Provider'), findsOneWidget);
   });
 
   testWidgets('typing a command shows the composer input', (tester) async {

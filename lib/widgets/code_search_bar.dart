@@ -7,19 +7,19 @@ import 'file_attachment_button.dart';
 /// How the Home command bar routes a submitted prompt.
 enum ComposerMode { ask, search }
 
-/// Bottom composer on the Home screen — ONE unified card, modern
-/// AI-assistant layout:
+/// Bottom composer on the Home screen — ONE unified glass card matching the
+/// reference layout:
 ///
-///   ┌──────────────────────────────────────┐
-///   │ ⚡ Ask CodePilot…                 [↑] │  ← input + primary action
-///   │ ──────────────────────────────────── │
-///   │ 📎 File · ⚡ Ask · 🔗 Integrate      │  ← quiet secondary row
-///   └──────────────────────────────────────┘
+///   ╭──────────────────────────────────────────╮
+///   │ ⚡  Ask CodePilot…                   (↑)  │  ← input row + blue send
+///   │ ──────────────────────────────────────── │  ← hairline divider
+///   │ 📎 File │ ✨Ask  🔍Search        🔗Integrate│  ← actions row
+///   ╰──────────────────────────────────────────╯
 ///
-/// The neon outline + glow stays (CodePilot identity), but the interior is
-/// calm: no nested bordered boxes, no competing buttons. [IntegrateButton]
-/// and the mode chip are quiet text controls; only the circular send button
-/// is a filled action.
+/// Thin electric-blue outline, subtle outer glow, dark translucent panel.
+/// Only the selected mode pill and the circular send button are filled;
+/// everything else stays quiet. The selected mode pill glows blue with an
+/// AI-sparkle icon (Ask) / magnifier (Search).
 class CodeSearchBar extends StatelessWidget {
   final TextEditingController controller;
   final FocusNode? focusNode;
@@ -49,20 +49,34 @@ class CodeSearchBar extends StatelessWidget {
     return SafeArea(
       top: false,
       child: Padding(
-        padding: const EdgeInsets.only(left: 12, right: 12, bottom: 4),
+        padding: const EdgeInsets.only(left: 14, right: 14, bottom: 6),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             if (attachmentStrip != null) attachmentStrip!,
             Container(
-              padding: const EdgeInsets.fromLTRB(14, 6, 10, 6),
+              padding: const EdgeInsets.fromLTRB(12, 10, 10, 4),
               decoration: BoxDecoration(
-                color: AppTheme.navyPanel,
-                borderRadius: BorderRadius.circular(24),
-                border: Border.all(color: AppTheme.glowAccent, width: 1),
+                // Dark translucent glass over the ambient background.
+                color: AppTheme.navyPanel.withOpacity(.82),
+                borderRadius: BorderRadius.circular(26),
+                border: Border.all(
+                  color: AppTheme.glowAccent.withOpacity(.85),
+                  width: 1,
+                ),
                 boxShadow: const [
-                  BoxShadow(color: AppTheme.glowSoft, blurRadius: 18, spreadRadius: 1),
+                  // Subtle neon-blue glow.
+                  BoxShadow(
+                      color: AppTheme.glowSoft,
+                      blurRadius: 24,
+                      spreadRadius: 2),
+                  // Grounding shadow so the card floats above the page.
+                  BoxShadow(
+                    color: Color(0x59000000),
+                    blurRadius: 18,
+                    offset: Offset(0, 10),
+                  ),
                 ],
               ),
               child: Column(mainAxisSize: MainAxisSize.min, children: [
@@ -74,7 +88,7 @@ class CodeSearchBar extends StatelessWidget {
                 Divider(
                   height: 10,
                   thickness: 0.7,
-                  color: AppTheme.border.withOpacity(.7),
+                  color: AppTheme.border.withOpacity(.55),
                 ),
                 _ComposerActions(
                   onIntegrateTap: onIntegrateTap,
@@ -122,7 +136,8 @@ class _ComposerInput extends StatelessWidget {
               maxLines: 5,
               textInputAction: TextInputAction.newline,
               textCapitalization: TextCapitalization.sentences,
-              style: const TextStyle(color: AppTheme.text, fontSize: 15, height: 1.35),
+              style: const TextStyle(
+                  color: AppTheme.text, fontSize: 15, height: 1.35),
               cursorColor: AppTheme.glowAccent,
               decoration: const InputDecoration(
                 hintText: 'Ask CodePilot…',
@@ -134,8 +149,7 @@ class _ComposerInput extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 8),
-          // The single primary action: circular blue send. Fades in only
-          // when there is text, keeping the resting state calm.
+          // The single primary action: circular blue send with a soft glow.
           AnimatedOpacity(
             duration: const Duration(milliseconds: 150),
             opacity: controller.text.trim().isEmpty ? 0.45 : 1.0,
@@ -150,7 +164,7 @@ class _ComposerInput extends StatelessWidget {
   }
 }
 
-/// Circular electric-blue send button (48dp touch target).
+/// Circular electric-blue send button (48dp touch target) with a neon halo.
 class _SendButton extends StatelessWidget {
   final bool enabled;
   final VoidCallback onSubmit;
@@ -159,24 +173,34 @@ class _SendButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Material(
-      color: AppTheme.glowAccent,
-      borderRadius: BorderRadius.circular(24),
-      child: InkWell(
+    return Container(
+      decoration: const BoxDecoration(
+        shape: BoxShape.circle,
+        boxShadow: [
+          BoxShadow(color: AppTheme.glowSoft, blurRadius: 14, spreadRadius: 1),
+        ],
+      ),
+      child: Material(
+        color: AppTheme.glowAccent,
         borderRadius: BorderRadius.circular(24),
-        onTap: enabled ? onSubmit : null,
-        child: const SizedBox(
-          width: 44,
-          height: 44,
-          child: Icon(Icons.arrow_upward, color: Colors.white, size: 22),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(24),
+          onTap: enabled ? onSubmit : null,
+          child: const SizedBox(
+            width: 44,
+            height: 44,
+            child: Icon(Icons.arrow_upward, color: Colors.white, size: 22),
+          ),
         ),
       ),
     );
   }
 }
 
-/// Bottom row: quiet text+icon controls — File, mode toggle, Integrate.
-/// None of them look like raised buttons; they are 44dp+ touch targets.
+/// Bottom row: 📎 File │ mode pill (Ask / Search) … Integrate.
+/// A thin vertical divider separates File from the mode pill; Integrate
+/// hugs the right edge. End controls shrink (never overflow) on small
+/// phones while the mode pill keeps its natural size.
 class _ComposerActions extends StatelessWidget {
   final VoidCallback onIntegrateTap;
   final ValueChanged<PlatformFile> onFilePicked;
@@ -195,20 +219,48 @@ class _ComposerActions extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Row(children: [
-      FileAttachmentButton(
-        onFilePicked: onFilePicked,
-        onError: onFileError,
-        compact: true,
+      Flexible(
+        child: FittedBox(
+          fit: BoxFit.scaleDown,
+          alignment: Alignment.centerLeft,
+          child: FileAttachmentButton(
+            onFilePicked: onFilePicked,
+            onError: onFileError,
+            compact: true,
+          ),
+        ),
       ),
-      const SizedBox(width: 4),
+      _VerticalDivider(),
       _ModeChip(mode: mode, onChanged: onModeChanged),
       const Spacer(),
-      IntegrateButton(onTap: onIntegrateTap, compact: true),
+      Flexible(
+        child: FittedBox(
+          fit: BoxFit.scaleDown,
+          alignment: Alignment.centerRight,
+          child: IntegrateButton(onTap: onIntegrateTap, compact: true),
+        ),
+      ),
     ]);
   }
 }
 
-/// Ask / Search routing toggle — a quiet segmented chip, not a button box.
+/// Thin vertical separator between the File button and the mode pill.
+class _VerticalDivider extends StatelessWidget {
+  const _VerticalDivider();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 1,
+      height: 18,
+      margin: const EdgeInsets.symmetric(horizontal: 5),
+      color: AppTheme.border.withOpacity(.8),
+    );
+  }
+}
+
+/// Ask / Search routing toggle. The ACTIVE pill is filled electric blue
+/// with a subtle glow; the inactive one stays quiet gray text.
 class _ModeChip extends StatelessWidget {
   final ComposerMode mode;
   final ValueChanged<ComposerMode> onChanged;
@@ -217,26 +269,20 @@ class _ModeChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      decoration: BoxDecoration(
-        color: AppTheme.bg.withOpacity(.6),
-        borderRadius: BorderRadius.circular(999),
+    return Row(mainAxisSize: MainAxisSize.min, children: [
+      _ModeSegment(
+        selected: mode == ComposerMode.ask,
+        icon: Icons.auto_awesome,
+        label: 'Ask',
+        onTap: () => onChanged(ComposerMode.ask),
       ),
-      child: Row(mainAxisSize: MainAxisSize.min, children: [
-        _ModeSegment(
-          selected: mode == ComposerMode.ask,
-          icon: Icons.auto_awesome,
-          label: 'Ask',
-          onTap: () => onChanged(ComposerMode.ask),
-        ),
-        _ModeSegment(
-          selected: mode == ComposerMode.search,
-          icon: Icons.search,
-          label: 'Search',
-          onTap: () => onChanged(ComposerMode.search),
-        ),
-      ]),
-    );
+      _ModeSegment(
+        selected: mode == ComposerMode.search,
+        icon: Icons.search,
+        label: 'Search',
+        onTap: () => onChanged(ComposerMode.search),
+      ),
+    ]);
   }
 }
 
@@ -263,20 +309,28 @@ class _ModeSegment extends StatelessWidget {
         onTap: onTap,
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 150),
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
           decoration: BoxDecoration(
-            color: selected ? AppTheme.glowSoft : Colors.transparent,
+            color: selected ? AppTheme.glowAccent : Colors.transparent,
             borderRadius: BorderRadius.circular(999),
+            boxShadow: selected
+                ? const [
+                    BoxShadow(
+                        color: AppTheme.glowSoft,
+                        blurRadius: 12,
+                        spreadRadius: 1),
+                  ]
+                : null,
           ),
           child: Row(mainAxisSize: MainAxisSize.min, children: [
             Icon(icon,
                 size: 14,
-                color: selected ? AppTheme.glowAccent : AppTheme.muted),
-            const SizedBox(width: 4),
+                color: selected ? Colors.white : AppTheme.muted),
+            const SizedBox(width: 5),
             Text(
               label,
               style: TextStyle(
-                color: selected ? AppTheme.text : AppTheme.muted,
+                color: selected ? Colors.white : AppTheme.muted,
                 fontSize: 12,
                 fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
               ),
@@ -314,7 +368,7 @@ class FileAttachmentChip extends StatelessWidget {
       decoration: BoxDecoration(
         color: AppTheme.navyPanel,
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: AppTheme.border),
+        border: Border.all(color: AppTheme.glowAccent.withOpacity(.4)),
       ),
       child: Row(children: [
         Icon(

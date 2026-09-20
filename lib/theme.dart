@@ -19,6 +19,23 @@ class AppTheme {
   static const glowAccent = Color(0xFF3B82F6); // neon-blue outline + glow
   static const glowSoft = Color(0x333B82F6); // soft outer glow (blue @ 20%)
 
+  // Gold accent — reserved for the header's API-key control.
+  static const gold = Color(0xFFF5C542);
+  static const goldSoft = Color(0x2BF5C542); // gold glow @ ~17%
+
+  /// Premium ambient background: near-black navy with a faint electric-blue
+  /// glow rising from the top and a deeper haze near the composer.
+  static const homeBackground = LinearGradient(
+    begin: Alignment.topCenter,
+    end: Alignment.bottomCenter,
+    colors: [
+      Color(0xFF070C18), // top: navy with the faintest blue cast
+      Color(0xFF05080F), // mid: near-black navy
+      Color(0xFF060B16), // bottom: faint haze behind the composer
+    ],
+    stops: [0.0, 0.55, 1.0],
+  );
+
   static ThemeData dark() {
     final base = ThemeData.dark(useMaterial3: true);
     return base.copyWith(

@@ -249,8 +249,13 @@ class AgentLoop {
         }
 
         if (resp.content.trim().isNotEmpty) {
-          _thoughts.add(AgentThought(resp.content.trim()));
           finalText = resp.content.trim();
+          // Narration between tool rounds is the model's user-facing
+          // reasoning; the FINAL round's content is the answer itself and
+          // is not duplicated as a reasoning block.
+          if (resp.toolCalls.isNotEmpty) {
+            _thoughts.add(AgentThought(resp.content.trim()));
+          }
         }
 
         if (resp.toolCalls.isEmpty) {
@@ -504,6 +509,7 @@ Working rules:
 8. Each tool call has its own time limit (commands 120s, CI polling 5 min). If a tool times out, do NOT retry the same call — report the timeout and continue or summarize.
 9. FINAL MESSAGE: a compact summary — Changes, Files changed, Verification, and Git result (commit hash / PR link) when applicable. Plain text; the UI renders it.
 10. NEVER invent tool results. NEVER claim a file was modified unless a write tool returned OK. NEVER claim tests passed unless you actually ran them and they passed.
+11. NARRATION: begin every turn that calls tools with ONE short, action-oriented sentence (max 25 words) saying what you are doing next and why (e.g. "I'll inspect the navigation setup before removing the duplicate tab."). The UI shows it as your visible reasoning — keep it concise; no private deliberation.
 ''';
     if (hasProject) {
       return '$base\nA project IS open. Use tools on it. Do not ask the user to paste files.';

@@ -199,6 +199,30 @@ class AgentStep {
     this.detail,
     this.expanded = false,
   });
+
+  /// JSON serialization for continuous activity persistence (see
+  /// AgentActivitySnapshot). Args must be JSON-safe (the registry only
+  /// passes string/bool/num values).
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'title': title,
+        'tool': tool,
+        'args': args,
+        'status': status.name,
+        if (detail != null) 'detail': detail,
+      };
+
+  factory AgentStep.fromJson(Map<String, dynamic> j) => AgentStep(
+        id: (j['id'] as String?) ?? '',
+        title: (j['title'] as String?) ?? '',
+        tool: (j['tool'] as String?) ?? '',
+        args: (j['args'] as Map?)?.cast<String, dynamic>() ?? const {},
+        status: AgentStepStatus.values.firstWhere(
+          (s) => s.name == j['status'],
+          orElse: () => AgentStepStatus.done,
+        ),
+        detail: j['detail'] as String?,
+      );
 }
 
 /// Manus-style "What the agent did" roll-up — derived ONLY from real

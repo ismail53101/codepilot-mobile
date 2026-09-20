@@ -206,18 +206,24 @@ class SearchHistoryStore {
   }
 }
 
-/// One saved AI chat session (conversation transcript + metadata).
+/// One saved AI chat session (conversation transcript + metadata + the
+/// agent task-activity snapshot, if the session contains agent work).
 class ChatSession {
   final String id;
   final String title;
   final DateTime time;
   final List<ChatMessage> messages;
 
+  /// Agent activity snapshot (timeline entries + task state + timings),
+  /// stored as raw JSON maps so old sessions without activity still load.
+  final Map<String, dynamic>? activity;
+
   const ChatSession({
     required this.id,
     required this.title,
     required this.time,
     required this.messages,
+    this.activity,
   });
 
   ChatSession withMessages(List<ChatMessage> messages) => ChatSession(
@@ -256,6 +262,9 @@ class ChatSessionStore {
                 for (final m in (item['messages'] as List?) ?? const [])
                   if (m is Map) ChatMessage.fromJson(Map<String, dynamic>.from(m)),
               ],
+              activity: item['activity'] is Map
+                  ? Map<String, dynamic>.from(item['activity'] as Map)
+                  : null,
             ),
       ]..removeWhere((s) => s.id.isEmpty || s.messages.isEmpty);
     } catch (_) {
@@ -267,7 +276,7 @@ class ChatSessionStore {
   /// the stored session so first-time callers can adopt it and keep
   /// updating the SAME session on subsequent saves (no duplicates when a
   /// thread is persisted mid-run).
-  Future<String> save({required String? existingId, required String title, required List<ChatMessage> messages}) async {
+  Future<String> save({required String? existingId, required String title, required List<ChatMessage> messages, Map<String, dynamic>? activity}) async {
     if (messages.isEmpty) return existingId ?? '';
     final id = existingId ?? DateTime.now().microsecondsSinceEpoch.toString();
     // Mutable copy — load() is documented mutable, but copy defensively so
@@ -281,6 +290,7 @@ class ChatSessionStore {
         title: title.isEmpty ? 'Chat' : title,
         time: DateTime.now(),
         messages: messages,
+        activity: activity,
       ),
     );
     if (sessions.length > maxSessions) sessions.removeRange(maxSessions, sessions.length);
@@ -291,6 +301,7 @@ class ChatSessionStore {
           'title': s.title,
           'time': s.time.toIso8601String(),
           'messages': [for (final m in s.messages) m.toJson()],
+          if (s.activity != null) 'activity': s.activity,
         },
     ]);
     final prefs = await SharedPreferences.getInstance();
@@ -309,6 +320,9 @@ class ChatSessionStore {
           'title': s.title,
           'time': s.time.toIso8601String(),
           'messages': [for (final m in s.messages) m.toJson()],
+          // Keep every remaining session's task activity — deleting one chat
+          // must never erase the persisted agent state of the others.
+          if (s.activity != null) 'activity': s.activity,
         },
     ]));
   }

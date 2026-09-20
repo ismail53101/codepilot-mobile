@@ -178,36 +178,43 @@ class _HomeScreenState extends State<HomeScreen> {
     return Scaffold(
       backgroundColor: AppTheme.navyBg,
       resizeToAvoidBottomInset: true,
-      body: SafeArea(
-        top: true,
-        bottom: false,
-        child: Column(children: [
-          CodePilotHeader(
-            menuItems: _menuItems,
-            onMenuSelected: _onMenuSelected,
-            onCreateProject: () => Navigator.pushNamed(context, '/new-project'),
-          ),
-          // Large intentionally empty workspace.
-          const Expanded(child: SizedBox.shrink()),
-          CodeSearchBar(
-            controller: _command,
-            focusNode: _searchFocus,
-            onSubmit: _runCommand,
-            mode: _mode,
-            onModeChanged: (m) => setState(() => _mode = m),
-            onIntegrateTap: () => Navigator.pushNamed(context, '/integrations'),
-            onFilePicked: _onFilePicked,
-            onFileError: (message) => ScaffoldMessenger.of(context)
-                .showSnackBar(SnackBar(content: Text(message))),
-            attachmentStrip: _attachment == null
-                ? null
-                : FileAttachmentChip(
-                    file: _attachment!,
-                    onRemove: () => setState(() => _attachment = null),
-                  ),
-          ),
-        ]),
-      ),
+      body: Stack(children: [
+        // Premium dark gradient + subtle ambient blue glow behind everything.
+        const _AmbientBackdrop(),
+        SafeArea(
+          top: true,
+          bottom: false,
+          child: Column(children: [
+            CodePilotHeader(
+              menuItems: _menuItems,
+              onMenuSelected: _onMenuSelected,
+              onCreateProject: () =>
+                  Navigator.pushNamed(context, '/new-project'),
+              onOpenApiKeys: () => Navigator.pushNamed(context, '/api'),
+            ),
+            // Large intentionally empty workspace.
+            const Expanded(child: SizedBox.shrink()),
+            CodeSearchBar(
+              controller: _command,
+              focusNode: _searchFocus,
+              onSubmit: _runCommand,
+              mode: _mode,
+              onModeChanged: (m) => setState(() => _mode = m),
+              onIntegrateTap: () =>
+                  Navigator.pushNamed(context, '/integrations'),
+              onFilePicked: _onFilePicked,
+              onFileError: (message) => ScaffoldMessenger.of(context)
+                  .showSnackBar(SnackBar(content: Text(message))),
+              attachmentStrip: _attachment == null
+                  ? null
+                  : FileAttachmentChip(
+                      file: _attachment!,
+                      onRemove: () => setState(() => _attachment = null),
+                    ),
+            ),
+          ]),
+        ),
+      ]),
     );
   }
 
@@ -216,5 +223,60 @@ class _HomeScreenState extends State<HomeScreen> {
     _command.dispose();
     _searchFocus.dispose();
     super.dispose();
+  }
+}
+
+/// Full-bleed ambient background: near-black navy gradient plus two or
+/// three faint radial blue glows. Purely decorative (ignores pointers) so
+/// it never steals taps from the empty workspace.
+class _AmbientBackdrop extends StatelessWidget {
+  const _AmbientBackdrop();
+
+  @override
+  Widget build(BuildContext context) {
+    return IgnorePointer(
+      child: Stack(fit: StackFit.expand, children: [
+        const DecoratedBox(
+          decoration: BoxDecoration(gradient: AppTheme.homeBackground),
+        ),
+        // Faint electric-blue haze rising behind the header (top-right).
+        const Align(
+          alignment: Alignment(1.05, -0.9),
+          child: _Glow(size: 320, opacity: .10),
+        ),
+        // Even fainter counter-glow on the left edge.
+        const Align(
+          alignment: Alignment(-1.1, -0.35),
+          child: _Glow(size: 260, opacity: .07),
+        ),
+        // Deep haze settling behind the composer.
+        const Align(
+          alignment: Alignment(0.15, 1.08),
+          child: _Glow(size: 360, opacity: .08),
+        ),
+      ]),
+    );
+  }
+}
+
+class _Glow extends StatelessWidget {
+  final double size;
+  final double opacity;
+
+  const _Glow({required this.size, required this.opacity});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: size,
+      height: size,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        gradient: RadialGradient(colors: [
+          AppTheme.glowAccent.withOpacity(opacity),
+          AppTheme.glowAccent.withOpacity(0),
+        ]),
+      ),
+    );
   }
 }

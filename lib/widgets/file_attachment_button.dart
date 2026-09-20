@@ -105,7 +105,7 @@ class _QuietAction extends StatelessWidget {
         borderRadius: BorderRadius.circular(10),
         onTap: onTap,
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
           child: Row(mainAxisSize: MainAxisSize.min, children: [
             Icon(icon, color: AppTheme.muted, size: 18),
             const SizedBox(width: 5),

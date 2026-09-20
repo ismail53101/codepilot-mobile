@@ -29,6 +29,13 @@ Build Logs · Export Project · Settings · Custom API Provider
 - **Copyable code blocks** — assistant replies render fenced code as
   monospace cards with a one-tap copy button; File Preview can copy the
   whole file or hand it to the AI with one tap.
+- **Live agent activity** — while a task runs you see the model's short
+  reasoning, real file reads/edits, terminal cards with actual output and
+  exit codes, phase progress, and elapsed time. The final "What the agent
+  did" summary is computed only from executed steps (no fake statistics),
+  failures show an honest "Task incomplete" block with Retry, and the
+  whole activity timeline is persisted mid-run so reopening the chat
+  restores the exact state.
 
 ## Security model
 

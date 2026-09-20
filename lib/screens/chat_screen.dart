@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../agent_loop.dart';
+import '../agent_activity.dart';
 import '../agent_service.dart';
 import '../api_client.dart';
 import '../github_service.dart';
@@ -52,8 +53,15 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _agentMode = true; // agent loop vs plain chat
   AgentMode _approvalMode = AgentMode.auto;
   AgentLoop? _activeLoop;
-  final List<AgentStep> _agentSteps = [];
-  String? _agentThought;
+
+  /// Ordered REAL activity timeline: model narration (ReasoningEntry)
+  /// interleaved with executed tool steps (StepEntry). Drives the live
+  /// activity panel AND the persisted snapshot — nothing is fabricated.
+  final List<AgentTimelineEntry> _timeline = [];
+
+  /// Real task start/end — the only sources for the elapsed label.
+  DateTime? _taskStart;
+  DateTime? _taskEnd;
   /// Explicit task lifecycle: the UI is driven by this + the loop's outcome
   /// stream, never by an indefinite boolean spinner.
   AgentTaskState _agentState = AgentTaskState.idle;
@@ -187,8 +195,13 @@ class _ChatScreenState extends State<ChatScreen> {
         content: '⏹ Task stopped — you left this screen while the agent was '
             'working. Send the task again (or use Retry) to continue.',
       ));
+      // Finalize the persisted activity state too, so reopening the chat
+      // shows the honest incomplete block instead of a phantom running task.
+      _agentState = AgentTaskState.cancelled;
+      _agentError = 'You left this screen while the agent was working.';
+      _taskEnd ??= DateTime.now();
     }
-    if (_messages.isNotEmpty) {
+    if (_messages.isNotEmpty || _timeline.isNotEmpty) {
       unawaited(_saveSession());
     }
     _activeLoop?.cancel();
@@ -251,6 +264,9 @@ class _ChatScreenState extends State<ChatScreen> {
         if (sessions.isNotEmpty) {
           _sessionId = sessions.first.id;
           _messages.addAll(sessions.first.messages);
+          // Restore the saved task activity too (steps, reasoning,
+          // progress, errors, result) so reopened chats look identical.
+          _restoreActivity(sessions.first.activity);
         }
       });
     }
@@ -276,6 +292,53 @@ class _ChatScreenState extends State<ChatScreen> {
     return 'Chat';
   }
 
+  /// Persisted activity snapshot — conversation + task state are saved
+  /// CONTINUOUSLY (task start, every finished step, final outcome), never
+  /// only at the end, so backing out mid-run preserves everything.
+  Map<String, dynamic>? _activitySnapshot() {
+    if (_timeline.isEmpty) return null;
+    return AgentActivitySnapshot(
+      state: _agentState.name,
+      entries: List.of(_timeline),
+      startedAt: _taskStart,
+      endedAt: _taskEnd,
+      error: _agentError,
+    ).toJson();
+  }
+
+  /// Restore a persisted activity snapshot (reopen conversation / resume).
+  void _restoreActivity(Map<String, dynamic>? data) {
+    if (data == null) return;
+    try {
+      final snap = AgentActivitySnapshot.fromJson(data);
+      var stateName = snap.state;
+      String? error = snap.error;
+      // A hard app kill can persist a non-final state — show it honestly
+      // as stopped rather than a phantom running task.
+      if (stateName == 'running' || stateName == 'stopping' || stateName == 'idle') {
+        stateName = 'cancelled';
+        error ??= 'The app closed while the task was running.';
+      }
+      final state = AgentTaskState.values
+          .firstWhere((s) => s.name == stateName, orElse: () => AgentTaskState.idle);
+      _timeline.addAll(snap.entries);
+      _agentState = state;
+      _agentError = error;
+      _taskStart = snap.startedAt;
+      _taskEnd = snap.endedAt;
+      _lastAgentRequest = _lastUserMessage();
+    } catch (_) {
+      // Corrupt snapshot → ignore activity, keep the transcript.
+    }
+  }
+
+  String? _lastUserMessage() {
+    for (final m in _messages.reversed) {
+      if (m.role == 'user') return m.content;
+    }
+    return null;
+  }
+
   Future<void> _saveSession() async {
     if (_messages.isEmpty) return;
     // Adopt the id on first save so every later save updates the SAME
@@ -284,6 +347,7 @@ class _ChatScreenState extends State<ChatScreen> {
       existingId: _sessionId,
       title: _sessionTitle,
       messages: List.of(_messages),
+      activity: _activitySnapshot(),
     );
     if (id.isNotEmpty && _sessionId == null) {
       _sessionId = id;
@@ -386,6 +450,13 @@ class _ChatScreenState extends State<ChatScreen> {
           ..clear()
           ..addAll(chosen.messages);
         _pending.clear();
+        // Swap in the chosen conversation's task activity (or none).
+        _timeline.clear();
+        _taskStart = null;
+        _taskEnd = null;
+        _agentState = AgentTaskState.idle;
+        _agentError = null;
+        _restoreActivity(chosen.activity);
       });
       await _saveSession();
       _scrollDown();
@@ -399,6 +470,11 @@ class _ChatScreenState extends State<ChatScreen> {
       _messages.clear();
       _pending.clear();
       _sessionId = null;
+      _timeline.clear();
+      _taskStart = null;
+      _taskEnd = null;
+      _agentState = AgentTaskState.idle;
+      _agentError = null;
     });
     _push('system', 'New chat. The previous conversation is saved under Chats.');
   }
@@ -417,6 +493,13 @@ class _ChatScreenState extends State<ChatScreen> {
         ..addAll(chosen.messages);
       _pending.clear();
       _recentSessions = const [];
+      // Restore this conversation's task activity (if it had any).
+      _timeline.clear();
+      _taskStart = null;
+      _taskEnd = null;
+      _agentState = AgentTaskState.idle;
+      _agentError = null;
+      _restoreActivity(chosen.activity);
     });
     _scrollDown();
   }
@@ -547,8 +630,9 @@ class _ChatScreenState extends State<ChatScreen> {
       _agentState = AgentTaskState.running;
       _agentError = null;
       _lastAgentRequest = text;
-      _agentSteps.clear();
-      _agentThought = null;
+      _timeline.clear();
+      _taskStart = DateTime.now(); // real start — drives the elapsed label
+      _taskEnd = null;
       _recentSessions = const [];
       _pendingImage = null;
       _pendingImageName = null;
@@ -589,17 +673,31 @@ class _ChatScreenState extends State<ChatScreen> {
       if (!mounted) return;
       setState(() {
         if (e is StepStarted) {
-          _agentSteps.add(e.step);
+          _timeline.add(StepEntry(e.step));
         } else if (e is StepFinished) {
-          final i = _agentSteps.indexWhere((s) => s.id == e.step.id);
-          if (i >= 0) _agentSteps[i] = e.step;
+          // Replace the in-flight entry with the finished step object.
+          final i = _timeline
+              .indexWhere((en) => en is StepEntry && en.step.id == e.step.id);
+          if (i >= 0) {
+            _timeline[i] = StepEntry(e.step);
+          } else {
+            _timeline.add(StepEntry(e.step));
+          }
+          // Continuous persistence: every REAL finished step is saved at
+          // once, so navigating away can never lose the activity history.
+          unawaited(_saveSession());
         }
       });
       _scrollDown();
     });
     _thoughtSub = loop.thoughts.listen((t) {
       if (!mounted) return;
-      setState(() => _agentThought = t.text);
+      setState(() {
+        // Append as a reasoning card, deduplicating identical repeats.
+        final last = _timeline.isEmpty ? null : _timeline.last;
+        if (last is ReasoningEntry && last.text == t.text) return;
+        _timeline.add(ReasoningEntry(t.text));
+      });
     });
     _approvalSub = loop.approvals.listen((a) async {
       final approved = await _askApproval(a.tool, a.args);
@@ -617,7 +715,7 @@ class _ChatScreenState extends State<ChatScreen> {
       setState(() {
         _agentState = o.state;
         if (o.state == AgentTaskState.failed) _agentError = o.message;
-        _agentThought = null;
+        _taskEnd = DateTime.now(); // real end — freezes the elapsed label
       });
       if (o.state == AgentTaskState.completed) {
         _push('assistant', o.message);
@@ -666,6 +764,7 @@ class _ChatScreenState extends State<ChatScreen> {
         setState(() {
           _agentState = AgentTaskState.failed;
           _agentError = '$e';
+          _taskEnd = DateTime.now();
         });
         _push('system', '✕ Task failed — $e', isError: true);
       }
@@ -682,7 +781,6 @@ class _ChatScreenState extends State<ChatScreen> {
       if (mounted) {
         setState(() {
           _busy = false;
-          _agentThought = null;
           // Absolute last resort: no path may leave a non-final state here.
           if (!_agentState.isFinal) {
             _agentState = _agentState == AgentTaskState.stopping
@@ -884,12 +982,13 @@ class _ChatScreenState extends State<ChatScreen> {
                   onDismiss: () => setState(() => _recentSessions = const []),
                 ),
               for (final m in _messages) _bubble(m),
-              if (_agentSteps.isNotEmpty || _agentState != AgentTaskState.idle)
+              if (_timeline.isNotEmpty || _agentState != AgentTaskState.idle)
                 AgentActivityPanel(
-                  steps: _agentSteps,
+                  timeline: _timeline,
                   state: _agentState,
-                  currentThought: _agentThought,
                   errorMessage: _agentError,
+                  startedAt: _taskStart,
+                  endedAt: _taskEnd,
                   onCancel: _agentState == AgentTaskState.running
                       ? _cancelAgent
                       : null,
@@ -901,7 +1000,7 @@ class _ChatScreenState extends State<ChatScreen> {
               if (_streamBuf != null) _bubble(ChatMessage(role: 'assistant', content: '$_streamBuf▍')),
               if (_busy &&
                   _streamBuf == null &&
-                  _agentSteps.isEmpty &&
+                  _timeline.isEmpty &&
                   _agentState == AgentTaskState.idle)
                 const Padding(padding: EdgeInsets.all(8), child: Center(child: CircularProgressIndicator())),
               for (var i = 0; i < _pending.length; i++) _pendingCard(i),
