@@ -14,6 +14,7 @@ import '../github_service.dart';
 import '../main.dart';
 import '../models.dart';
 import '../pdf_text.dart';
+import '../preview_manager.dart';
 import '../project_service.dart';
 import '../stores.dart';
 import '../theme.dart';
@@ -570,7 +571,9 @@ class _ChatScreenState extends State<ChatScreen> {
       String reply;
       if (settings.streaming) {
         final buf = StringBuffer();
-        await for (final piece in apiClient.chatStream(messages)) {
+        // Provider router: streams through the highest-priority capable
+        // provider and falls back down the configured chain.
+        await for (final piece in aiRouter.streamWithFallback(messages)) {
           buf.write(piece);
           if (!mounted) return; // user left the screen — stop stream updates
           setState(() => _streamBuf = buf.toString());
@@ -579,7 +582,7 @@ class _ChatScreenState extends State<ChatScreen> {
         if (!mounted) return;
         setState(() => _streamBuf = null);
       } else {
-        reply = await apiClient.chat(messages);
+        reply = await aiRouter.chatWithFallback(messages);
       }
       if (!mounted) return;
 
@@ -657,7 +660,9 @@ class _ChatScreenState extends State<ChatScreen> {
     }
 
     final loop = AgentLoop(
-      backend: apiClient,
+      // Provider router: automatic/manual selection + bounded fallback
+      // across every configured provider/key.
+      backend: aiRouter,
       registry: ToolRegistry(
         projects: projectService,
         github: githubService,
@@ -996,6 +1001,9 @@ class _ChatScreenState extends State<ChatScreen> {
                           _agentState == AgentTaskState.cancelled)
                       ? _retryLast
                       : null,
+                  onPreview: _agentState == AgentTaskState.completed
+                      ? () => openProjectPreview(context)
+                      : null,
                 ),
               if (_streamBuf != null) _bubble(ChatMessage(role: 'assistant', content: '$_streamBuf▍')),
               if (_busy &&
@@ -1101,6 +1109,24 @@ class _ChatScreenState extends State<ChatScreen> {
                         const SizedBox(width: 4),
                         Text(_modeLabel,
                             style: const TextStyle(fontSize: 11, color: AppTheme.muted)),
+                      ]),
+                    ),
+                  ),
+                // ▶ Live preview of the open project — static web projects
+                // render fully on-device; unsupported types say so honestly.
+                if (projectService.projectName != null)
+                  InkWell(
+                    borderRadius: BorderRadius.circular(10),
+                    onTap: () => openProjectPreview(context),
+                    child: const Padding(
+                      padding: EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                      child: Row(mainAxisSize: MainAxisSize.min, children: [
+                        Icon(Icons.play_circle_outline,
+                            size: 14, color: AppTheme.muted),
+                        SizedBox(width: 4),
+                        Text('Preview',
+                            style: TextStyle(
+                                fontSize: 11, color: AppTheme.muted)),
                       ]),
                     ),
                   ),

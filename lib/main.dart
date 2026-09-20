@@ -4,7 +4,9 @@ import 'agent_service.dart';
 import 'api_client.dart';
 import 'github_service.dart';
 import 'project_service.dart';
-import 'screens/api_settings_screen.dart';
+import 'providers/provider_router.dart';
+import 'providers/provider_store.dart';
+import 'screens/api_key_manager_screen.dart';
 import 'screens/build_logs_screen.dart';
 import 'screens/change_diff_screen.dart';
 import 'screens/chat_screen.dart';
@@ -38,7 +40,9 @@ Future<void> main() async {
 /// App-wide singletons (simple service locator).
 final projectService = ProjectService();
 final settingsStore = SettingsStore();
-final apiClient = ApiClient(settingsStore);
+final apiClient = ApiClient(settingsStore); // legacy single-provider client (settings screen + streaming)
+final providerStore = ProviderStore();
+final aiRouter = ProviderRouter(store: providerStore, legacy: settingsStore);
 final agentService = AgentService(projectService);
 final githubService = GitHubService(settingsStore);
 final githubProjectStore = GitHubProjectStore(settingsStore);
@@ -70,6 +74,7 @@ class CodePilotApp extends StatelessWidget {
         '/export': (_) => const ExportScreen(),
         '/settings': (_) => const SettingsScreen(),
         '/api': (_) => const ApiSettingsScreen(),
+        '/keys': (_) => const ApiKeyManagerScreen(),
         '/github': (_) => const GitHubScreen(),
         '/projects': (_) => const ProjectsScreen(),
         '/new-project': (_) => const NewProjectScreen(),

@@ -40,6 +40,10 @@ class AgentActivityPanel extends StatefulWidget {
   final VoidCallback? onCancel;
   final VoidCallback? onRetry;
 
+  /// ▶ Preview action on the completed-task card (opens the live local
+  /// preview when the open project type supports it).
+  final VoidCallback? onPreview;
+
   const AgentActivityPanel({
     super.key,
     required this.timeline,
@@ -49,6 +53,7 @@ class AgentActivityPanel extends StatefulWidget {
     this.endedAt,
     this.onCancel,
     this.onRetry,
+    this.onPreview,
   });
 
   @override
@@ -670,6 +675,24 @@ class _AgentActivityPanelState extends State<AgentActivityPanel> {
               children: [
                 for (final f in summary.filesChanged.take(8)) _pathChip(f),
               ],
+            ),
+          ],
+          if (widget.onPreview != null) ...[
+            const SizedBox(height: 8),
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton.icon(
+                style: FilledButton.styleFrom(
+                  backgroundColor: AppTheme.glowSoft,
+                  foregroundColor: AppTheme.glowAccent,
+                  side: const BorderSide(color: AppTheme.glowAccent),
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                ),
+                onPressed: widget.onPreview,
+                icon: const Icon(Icons.play_circle_outline, size: 16),
+                label: const Text('Preview',
+                    style: TextStyle(fontSize: 12.5)),
+              ),
             ),
           ],
           for (final f in summary.filesDeleted.take(4))

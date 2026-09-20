@@ -190,7 +190,7 @@ class _HomeScreenState extends State<HomeScreen> {
               onMenuSelected: _onMenuSelected,
               onCreateProject: () =>
                   Navigator.pushNamed(context, '/new-project'),
-              onOpenApiKeys: () => Navigator.pushNamed(context, '/api'),
+              onOpenApiKeys: () => Navigator.pushNamed(context, '/keys'),
             ),
             // Large intentionally empty workspace.
             const Expanded(child: SizedBox.shrink()),

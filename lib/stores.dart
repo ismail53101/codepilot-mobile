@@ -10,9 +10,14 @@ import 'models.dart';
 class SecureStore {
   static const _keyName = 'codepilot_api_key';
   static const _githubTokenName = 'codepilot_github_token';
-  final FlutterSecureStorage _storage = const FlutterSecureStorage(
-    aOptions: AndroidOptions(encryptedSharedPreferences: true),
-  );
+  final FlutterSecureStorage _storage;
+
+  /// Injectable storage so tests can subclass/replace behavior.
+  SecureStore({FlutterSecureStorage? storage})
+      : _storage = storage ??
+            const FlutterSecureStorage(
+              aOptions: AndroidOptions(encryptedSharedPreferences: true),
+            );
 
   Future<String?> readApiKey() => _storage.read(key: _keyName);
 
@@ -30,7 +35,10 @@ class SecureStore {
 /// Non-secret settings (provider name/base URL/model/timeout/streaming).
 class SettingsStore {
   static const _kSettings = 'api_settings';
-  final SecureStore _secure = SecureStore();
+  final SecureStore _secure;
+
+  /// Injectable secure store so tests can stub key reads.
+  SettingsStore({SecureStore? secure}) : _secure = secure ?? SecureStore();
 
   Future<ApiSettings> load() async {
     final prefs = await SharedPreferences.getInstance();

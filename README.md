@@ -21,6 +21,22 @@ Build Logs · Export Project · Settings · Custom API Provider
 
 ## Power features
 
+- **Multi-provider API keys** — the 🔑 header button opens the API Key
+  Manager: any mix of OpenRouter, OpenAI, Google Gemini, Anthropic and
+  custom OpenAI-compatible providers, each with multiple key slots, model,
+  optional base URL, enable/disable, priority and default. Keys are masked
+  (••••••••8F42), stored only in Keystore-backed secure storage, and never
+  logged. Automatic routing tries Priority 1 first and falls back across
+  keys/providers on rate limits, quota, invalid keys or outages (capped at
+  5 attempts); Manual mode pins one provider. The previous single-provider
+  setup migrates automatically on first open.
+- **Project preview — no GitHub needed** — ▶ Preview (chat bottom bar, and
+  the completed-task card) serves the open project over a loopback HTTP
+  server and renders it in an in-app WebView: real CSS, real JavaScript,
+  relative assets, SPA fallback. Static HTML/CSS/JS projects work fully
+  offline. Flutter/Android/Node/Python/React-Next projects honestly show
+  "Preview unavailable" with the real reason and options — never a fake
+  preview. Reload, Open-in-browser and copy-URL actions included.
 - **Chat memory** — every conversation is saved on-device (last 30) and
   resumes automatically after an app restart. Chat → 💬 lists and resumes
   previous chats, ✚ starts a new one.

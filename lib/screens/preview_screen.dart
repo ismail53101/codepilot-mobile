@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
 import '../main.dart';
@@ -26,7 +27,11 @@ class PreviewScreen extends StatefulWidget {
   final String? html;
   final String? path;
 
-  const PreviewScreen({super.key, this.rawHtml, this.html, this.path});
+  /// Friendly screen title for project previews (the project name).
+  final String? projectTitle;
+
+  const PreviewScreen(
+      {super.key, this.rawHtml, this.html, this.path, this.projectTitle});
 
   /// Can this file be previewed in-app?
   static bool isPreviewable(String path) {
@@ -67,6 +72,7 @@ class _PreviewScreenState extends State<PreviewScreen> {
   }
 
   Future<void> _resolveSource() async {
+    if (mounted) setState(() => _error = null); // fresh attempt (Retry)
     final raw = _raw;
     if (raw != null) {
       _initController(raw);
@@ -203,7 +209,9 @@ class _PreviewScreenState extends State<PreviewScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final title = widget.path?.split('/').last ?? 'Live preview';
+    final title = widget.projectTitle ??
+        widget.path?.split('/').last ??
+        'Live preview';
     return Scaffold(
       backgroundColor: AppTheme.bg,
       appBar: AppBar(
@@ -214,6 +222,47 @@ class _PreviewScreenState extends State<PreviewScreen> {
             tooltip: 'Reload preview',
             onPressed: _controller == null ? null : _reload,
           ),
+          if (_loadedUrl != null)
+            PopupMenuButton<String>(
+              tooltip: 'More',
+              icon: const Icon(Icons.more_vert, size: 20),
+              onSelected: (v) async {
+                if (v == 'browser') {
+                  final uri = Uri.parse(_loadedUrl!);
+                  // The loopback URL opens in the device's own browser.
+                  if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
+                    if (context.mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                          content: Text('No browser available to open the preview.'),
+                          duration: Duration(seconds: 2)));
+                    }
+                  }
+                } else if (v == 'url') {
+                  await Clipboard.setData(ClipboardData(text: _loadedUrl!));
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                        content: Text('Preview URL copied'),
+                        duration: Duration(seconds: 1)));
+                  }
+                }
+              },
+              itemBuilder: (_) => const [
+                PopupMenuItem(
+                    value: 'browser',
+                    child: Row(children: [
+                      Icon(Icons.open_in_browser, size: 16),
+                      SizedBox(width: 8),
+                      Text('Open in browser', style: TextStyle(fontSize: 13)),
+                    ])),
+                PopupMenuItem(
+                    value: 'url',
+                    child: Row(children: [
+                      Icon(Icons.link, size: 16),
+                      SizedBox(width: 8),
+                      Text('Copy preview URL', style: TextStyle(fontSize: 13)),
+                    ])),
+              ],
+            ),
           IconButton(
             icon: const Icon(Icons.copy),
             tooltip: 'Copy source',
@@ -228,7 +277,7 @@ class _PreviewScreenState extends State<PreviewScreen> {
                   },
           ),
         ],
-        bottom: _loadProgress < 100
+        bottom: _loadProgress < 100 && _error == null
             ? PreferredSize(
                 preferredSize: const Size.fromHeight(2),
                 child: LinearProgressIndicator(
@@ -241,15 +290,49 @@ class _PreviewScreenState extends State<PreviewScreen> {
             : null,
       ),
       body: _error != null
-          ? Center(
-              child: Padding(
-                padding: const EdgeInsets.all(24),
-                child: Text(_error!, style: const TextStyle(color: AppTheme.err)),
-              ),
-            )
+          ? _errorView()
           : _controller == null
               ? const Center(child: CircularProgressIndicator(color: AppTheme.glowAccent))
               : WebViewWidget(controller: _controller!),
+    );
+  }
+
+  /// Honest failure state — never a fake success: the real reason plus
+  /// Retry. Back navigation is the AppBar's ← button (Back to Project).
+  Widget _errorView() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          const Icon(Icons.error_outline, color: AppTheme.err, size: 30),
+          const SizedBox(height: 10),
+          const Text('Preview failed to load',
+              style: TextStyle(
+                  color: AppTheme.text,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600)),
+          const SizedBox(height: 6),
+          Text(
+            _error!,
+            textAlign: TextAlign.center,
+            style: const TextStyle(color: AppTheme.muted, fontSize: 12.5),
+          ),
+          const SizedBox(height: 14),
+          FilledButton.icon(
+            style: FilledButton.styleFrom(
+                backgroundColor: AppTheme.glowAccent),
+            onPressed: () {
+              setState(() {
+                _error = null;
+                _controller = null;
+              });
+              _resolveSource();
+            },
+            icon: const Icon(Icons.refresh, size: 16),
+            label: const Text('Retry'),
+          ),
+        ]),
+      ),
     );
   }
 }
