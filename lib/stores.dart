@@ -221,6 +221,7 @@ class ChatSession {
   final String title;
   final DateTime time;
   final List<ChatMessage> messages;
+  final bool isProject;
 
   /// Agent activity snapshot (timeline entries + task state + timings),
   /// stored as raw JSON maps so old sessions without activity still load.
@@ -231,6 +232,7 @@ class ChatSession {
     required this.title,
     required this.time,
     required this.messages,
+    this.isProject = false,
     this.activity,
   });
 
@@ -239,6 +241,7 @@ class ChatSession {
         title: title,
         time: DateTime.now(),
         messages: messages,
+        isProject: isProject,
       );
 }
 
@@ -266,6 +269,7 @@ class ChatSessionStore {
               id: (item['id'] as String?) ?? '',
               title: (item['title'] as String?) ?? 'Chat',
               time: DateTime.tryParse((item['time'] as String?) ?? '') ?? DateTime.now(),
+              isProject: (item['isProject'] as bool?) ?? false,
               messages: [
                 for (final m in (item['messages'] as List?) ?? const [])
                   if (m is Map) ChatMessage.fromJson(Map<String, dynamic>.from(m)),
@@ -284,7 +288,7 @@ class ChatSessionStore {
   /// the stored session so first-time callers can adopt it and keep
   /// updating the SAME session on subsequent saves (no duplicates when a
   /// thread is persisted mid-run).
-  Future<String> save({required String? existingId, required String title, required List<ChatMessage> messages, Map<String, dynamic>? activity}) async {
+  Future<String> save({required String? existingId, required String title, required List<ChatMessage> messages, bool isProject = false, Map<String, dynamic>? activity}) async {
     if (messages.isEmpty) return existingId ?? '';
     final id = existingId ?? DateTime.now().microsecondsSinceEpoch.toString();
     // Mutable copy — load() is documented mutable, but copy defensively so
@@ -298,6 +302,7 @@ class ChatSessionStore {
         title: title.isEmpty ? 'Chat' : title,
         time: DateTime.now(),
         messages: messages,
+        isProject: isProject,
         activity: activity,
       ),
     );
@@ -308,6 +313,7 @@ class ChatSessionStore {
           'id': s.id,
           'title': s.title,
           'time': s.time.toIso8601String(),
+          'isProject': s.isProject,
           'messages': [for (final m in s.messages) m.toJson()],
           if (s.activity != null) 'activity': s.activity,
         },
@@ -327,6 +333,7 @@ class ChatSessionStore {
           'id': s.id,
           'title': s.title,
           'time': s.time.toIso8601String(),
+          'isProject': s.isProject,
           'messages': [for (final m in s.messages) m.toJson()],
           // Keep every remaining session's task activity — deleting one chat
           // must never erase the persisted agent state of the others.

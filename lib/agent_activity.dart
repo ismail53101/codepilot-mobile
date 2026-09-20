@@ -67,6 +67,8 @@ class AgentActivitySnapshot {
   final DateTime? startedAt;
   final DateTime? endedAt;
   final String? error;
+  /// Compact checkpoint data for resuming interrupted Project tasks.
+  final Map<String, dynamic>? resumeContext;
 
   const AgentActivitySnapshot({
     required this.state,
@@ -74,6 +76,7 @@ class AgentActivitySnapshot {
     this.startedAt,
     this.endedAt,
     this.error,
+    this.resumeContext,
   });
 
   Map<String, dynamic> toJson() => {
@@ -82,6 +85,7 @@ class AgentActivitySnapshot {
         if (startedAt != null) 'startedAt': startedAt!.toIso8601String(),
         if (endedAt != null) 'endedAt': endedAt!.toIso8601String(),
         if (error != null) 'error': error,
+        if (resumeContext != null) 'resumeContext': resumeContext,
       };
 
   static AgentActivitySnapshot fromJson(Map<String, dynamic> j) {
@@ -97,6 +101,9 @@ class AgentActivitySnapshot {
       startedAt: parse(j['startedAt'] as String?),
       endedAt: parse(j['endedAt'] as String?),
       error: j['error'] as String?,
+      resumeContext: j['resumeContext'] is Map
+          ? Map<String, dynamic>.from(j['resumeContext'] as Map)
+          : null,
     );
   }
 }

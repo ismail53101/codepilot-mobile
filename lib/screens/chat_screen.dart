@@ -46,12 +46,13 @@ class _ChatScreenState extends State<ChatScreen> {
   // Content of a file attached on Home (route argument), injected once.
   String? _pendingAttachment;
   String? _pendingAttachmentName;
+  String? _pendingAttachmentKind;
   // Image attached in-chat (base64 data URL) — sent via vision format.
   String? _pendingImage;
   String? _pendingImageName;
 
   // ---- autonomous agent state ----
-  bool _agentMode = true; // agent loop vs plain chat
+  bool _agentMode = false; // Chat is the safe default; Project is explicit.
   AgentMode _approvalMode = AgentMode.auto;
   AgentLoop? _activeLoop;
 
@@ -69,6 +70,8 @@ class _ChatScreenState extends State<ChatScreen> {
   String? _agentError;
   /// Text of the last agent task — powers the one-tap Retry on failure.
   String? _lastAgentRequest;
+  String? _taskId;
+  Map<String, dynamic>? _resumeContext;
   /// Most recent saved conversations (for the resume card on fresh chats).
   List<ChatSession> _recentSessions = const [];
   StreamSubscription<AgentEvent>? _eventSub;
@@ -82,7 +85,8 @@ class _ChatScreenState extends State<ChatScreen> {
   static const _imageExtensions = ['png', 'jpg', 'jpeg', 'webp', 'gif'];
 
   /// Pick an image/code file mid-chat. Images go to the model as vision
-  /// input; text files are inlined; ZIPs import as a project.
+  /// input; text files are inlined. Nothing becomes a project unless the
+  /// user explicitly imports it from Project mode.
   Future<void> _pickAttachment() async {
     try {
       final result = await FilePicker.platform.pickFiles(withData: true);
@@ -91,16 +95,22 @@ class _ChatScreenState extends State<ChatScreen> {
       final ext = file.extension?.toLowerCase() ?? '';
 
       if (ext == 'zip') {
-        if (file.path == null) return;
-        try {
-          final message = await projectService.importZip(file.path!);
-          if (!mounted) return;
-          ScaffoldMessenger.of(context)
-              .showSnackBar(SnackBar(content: Text(message)));
-        } catch (e) {
-          if (!mounted) return;
-          ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text('Could not import ZIP: $e')));
+        if (_agentMode) {
+          if (file.path == null) return;
+          try {
+            final message = await projectService.importZip(file.path!);
+            if (!mounted) return;
+            ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+          } catch (e) {
+            if (!mounted) return;
+            ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Could not import ZIP: $e')));
+          }
+        } else {
+          setState(() {
+            _pendingAttachment = null;
+            _pendingAttachmentName = file.name;
+            _pendingAttachmentKind = 'archive';
+          });
         }
         return;
       }
@@ -114,6 +124,7 @@ class _ChatScreenState extends State<ChatScreen> {
         setState(() {
           _pendingImage = 'data:image/$ext;base64,${base64Encode(bytes)}';
           _pendingImageName = file.name;
+          _pendingAttachmentKind = 'image';
         });
         return;
       }
@@ -138,7 +149,8 @@ class _ChatScreenState extends State<ChatScreen> {
           }
           setState(() {
             _pendingAttachment = result.text;
-            _pendingAttachmentName = '${file.name} (PDF text)';
+            _pendingAttachmentName = file.name;
+            _pendingAttachmentKind = 'pdf';
           });
         } catch (_) {
           _push('system', 'Could not extract text from "${file.name}" — it may be corrupted or password-protected.',
@@ -162,6 +174,7 @@ class _ChatScreenState extends State<ChatScreen> {
             ? content.substring(0, 12000)
             : content;
         _pendingAttachmentName = file.name;
+        _pendingAttachmentKind = 'code';
       });
     } catch (e) {
       _push('system', 'File picker unavailable: $e', isError: true);
@@ -170,15 +183,32 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _clearAttachments() {
     setState(() {
-      _pendingAttachment = null;
-      _pendingAttachmentName = null;
-      _pendingImage = null;
-      _pendingImageName = null;
+      _clearAttachmentState();
     });
   }
 
+  void _clearAttachmentState() {
+    _pendingAttachment = null;
+    _pendingAttachmentName = null;
+    _pendingAttachmentKind = null;
+    _pendingImage = null;
+    _pendingImageName = null;
+  }
+
   bool get _hasPendingAttachment =>
-      _pendingAttachment != null || _pendingImage != null;
+      _pendingAttachmentName != null || _pendingImage != null;
+
+  bool _looksLikeProjectAction(String text) {
+    final value = text.trim().toLowerCase();
+    return RegExp(r'^(code|project)$').hasMatch(value) ||
+        RegExp(r'\b(create|open|edit|continue|modify|build|import)\b.*\b(project|website|web app|page|files?|app)\b').hasMatch(value) ||
+        RegExp(r'\b(create|build)\b.*\b(html|css|javascript|login|e-commerce|store)\b').hasMatch(value);
+  }
+
+  void _setProjectMode(bool project) {
+    if (_busy || _agentMode == project) return;
+    setState(() => _agentMode = project);
+  }
 
   @override
   void dispose() {
@@ -218,6 +248,9 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void initState() {
     super.initState();
+    // Opening an existing project is an explicit project action; entering
+    // from Home without one always starts in normal Chat mode.
+    _agentMode = projectService.projectName != null;
     WidgetsBinding.instance.addPostFrameCallback((_) => _initFromRoute());
   }
 
@@ -255,19 +288,20 @@ class _ChatScreenState extends State<ChatScreen> {
         _sessionId = null;
         _messages.clear();
         _pending.clear();
-        _recentSessions = sessions.take(3).toList();
+        _recentSessions = sessions.where((s) => s.isProject == _agentMode).take(3).toList();
       });
     } else if (!_restored) {
       final sessions = await chatSessionStore.load();
       if (!mounted) return;
       setState(() {
         _restored = true;
-        if (sessions.isNotEmpty) {
-          _sessionId = sessions.first.id;
-          _messages.addAll(sessions.first.messages);
+        final matching = sessions.where((s) => s.isProject == _agentMode).toList();
+        if (matching.isNotEmpty) {
+          _sessionId = matching.first.id;
+          _messages.addAll(matching.first.messages);
           // Restore the saved task activity too (steps, reasoning,
           // progress, errors, result) so reopened chats look identical.
-          _restoreActivity(sessions.first.activity);
+          _restoreActivity(matching.first.activity);
         }
       });
     }
@@ -304,6 +338,7 @@ class _ChatScreenState extends State<ChatScreen> {
       startedAt: _taskStart,
       endedAt: _taskEnd,
       error: _agentError,
+      resumeContext: _resumeContext,
     ).toJson();
   }
 
@@ -327,6 +362,8 @@ class _ChatScreenState extends State<ChatScreen> {
       _agentError = error;
       _taskStart = snap.startedAt;
       _taskEnd = snap.endedAt;
+      _resumeContext = snap.resumeContext;
+      _taskId = _resumeContext?['taskId'] as String?;
       _lastAgentRequest = _lastUserMessage();
     } catch (_) {
       // Corrupt snapshot → ignore activity, keep the transcript.
@@ -340,6 +377,53 @@ class _ChatScreenState extends State<ChatScreen> {
     return null;
   }
 
+  void _updateResumeContext({String? interruptedAction}) {
+    final steps = [
+      for (final entry in _timeline)
+        if (entry is StepEntry) entry.step,
+    ];
+    final done = steps.where((s) => s.status == AgentStepStatus.done).toList();
+    final failed = steps.where((s) => s.status == AgentStepStatus.failed).toList();
+    String label(AgentStep s) {
+      final detail = s.args['path'] ?? s.args['command'] ?? s.args['query'];
+      return detail == null ? s.title : '${s.title}: $detail';
+    }
+    _resumeContext = {
+      'taskId': _taskId,
+      'projectId': projectService.projectName,
+      'objective': _lastAgentRequest ?? '',
+      'completedSteps': [for (final s in done) label(s)],
+      'modifiedFiles': [
+        for (final s in done.where((s) => const ['write_file', 'create_file', 'patch_file', 'delete_file', 'move_file'].contains(s.tool)))
+          if (s.args['path'] is String) s.args['path'],
+      ],
+      'commandsSucceeded': [
+        for (final s in done.where((s) => s.tool == 'run_command'))
+          if (s.args['command'] is String) s.args['command'],
+      ],
+      'failedStep': failed.isEmpty ? null : label(failed.last),
+      'lastSuccessfulCheckpoint': done.isEmpty ? null : label(done.last),
+      'nextAction': interruptedAction ?? (failed.isEmpty ? 'Inspect the current project and continue with the first incomplete action.' : label(failed.last)),
+      'pendingSteps': remainingWork(steps),
+      'timestamp': DateTime.now().toIso8601String(),
+    };
+  }
+
+  String _resumePrompt() {
+    final c = _resumeContext;
+    if (c == null) return _lastAgentRequest ?? '';
+    final completed = (c['completedSteps'] as List? ?? const []).join('\n- ');
+    final pending = (c['pendingSteps'] as List? ?? const []).join('\n- ');
+    return 'RESUME EXISTING PROJECT TASK FROM CHECKPOINT.\n'
+        'PROJECT: ${c['projectId'] ?? projectService.projectName ?? 'none'}\n'
+        'ORIGINAL TASK: ${c['objective']}\n'
+        'COMPLETED CHECKPOINTS:\n- $completed\n'
+        'LAST SUCCESSFUL CHECKPOINT: ${c['lastSuccessfulCheckpoint'] ?? 'none'}\n'
+        'INTERRUPTED ACTION: ${c['failedStep'] ?? c['nextAction'] ?? 'unknown'}\n'
+        'REMAINING:\n- $pending\n'
+        'IMPORTANT: Inspect the current filesystem first. Do not repeat completed work or rewrite files that already contain the intended changes. Continue from the first incomplete action.';
+  }
+
   Future<void> _saveSession() async {
     if (_messages.isEmpty) return;
     // Adopt the id on first save so every later save updates the SAME
@@ -348,6 +432,7 @@ class _ChatScreenState extends State<ChatScreen> {
       existingId: _sessionId,
       title: _sessionTitle,
       messages: List.of(_messages),
+      isProject: _agentMode,
       activity: _activitySnapshot(),
     );
     if (id.isNotEmpty && _sessionId == null) {
@@ -356,7 +441,8 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _openChatHistory() async {
-    final sessions = await chatSessionStore.load();
+    final allSessions = await chatSessionStore.load();
+    final sessions = allSessions.where((s) => s.isProject == _agentMode).toList();
     if (!mounted) return;
     Object? sheetResult;
     await showModalBottomSheet<void>(
@@ -510,24 +596,32 @@ class _ChatScreenState extends State<ChatScreen> {
     final text = _lastAgentRequest;
     if (text == null || _busy) return;
     if (!_agentMode) setState(() => _agentMode = true);
-    _agentSend(text);
+    _agentSend(text, resume: _resumeContext != null);
   }
 
   Future<void> _send() async {
     final text = _input.text.trim();
     if (text.isEmpty || _busy) return;
+    if (!_agentMode && _looksLikeProjectAction(text)) {
+      setState(() => _agentMode = true);
+      _push('system', 'Project Mode enabled for this request.');
+    }
     if (_agentMode) return _agentSend(text);
     final image = _pendingImage;
+    final attachmentName = _pendingAttachmentName ?? _pendingImageName;
+    final attachmentKind = _pendingAttachmentKind ?? (image == null ? null : 'image');
+    final attachmentContent = _pendingAttachment;
     setState(() {
       _messages.add(ChatMessage(
         role: 'user',
         content: text,
         imageDataUrl: image,
         hasImage: image != null,
+        attachmentName: attachmentName,
+        attachmentKind: attachmentKind,
       ));
       _busy = true;
-      _pendingImage = null;
-      _pendingImageName = null;
+      _clearAttachmentState();
     });
     _input.clear();
     // Persist immediately (same mid-run-back-out protection as agent mode).
@@ -535,23 +629,18 @@ class _ChatScreenState extends State<ChatScreen> {
 
     // Inject attached file content (from Home or the chat paperclip) once.
     var effectiveRequest = text;
-    final attachmentContent = _pendingAttachment;
-    final attachmentName = _pendingAttachmentName;
     if (attachmentContent != null) {
       final clipped = attachmentContent.length > 12000
           ? '${attachmentContent.substring(0, 12000)}\n… (truncated)'
           : attachmentContent;
       effectiveRequest = 'Attached file "$attachmentName":\n```\n$clipped\n```\n\n$text';
       setState(() {
-        _pendingAttachment = null;
-        _pendingAttachmentName = null;
+        _clearAttachmentState();
       });
     }
 
     try {
-      final context = projectService.projectName == null
-          ? agentService.buildGeneralContext(request: effectiveRequest)
-          : agentService.buildContext(request: effectiveRequest);
+      final context = agentService.buildGeneralContext(request: effectiveRequest);
       final history = _messages.length > 10
           ? _messages.sublist(_messages.length - 10)
           : _messages;
@@ -620,42 +709,49 @@ class _ChatScreenState extends State<ChatScreen> {
   // Autonomous agent flow
   // ==================================================================
 
-  Future<void> _agentSend(String text) async {
+  Future<void> _agentSend(String text, {bool resume = false}) async {
     final image = _pendingImage;
+    final attachmentName = _pendingAttachmentName ?? _pendingImageName;
+    final attachmentKind = _pendingAttachmentKind ?? (image == null ? null : 'image');
+    final attachmentContent = _pendingAttachment;
     setState(() {
-      _messages.add(ChatMessage(
-        role: 'user',
-        content: text,
-        imageDataUrl: image,
-        hasImage: image != null,
-      ));
+      if (!resume) {
+        _messages.add(ChatMessage(
+          role: 'user',
+          content: text,
+          imageDataUrl: image,
+          hasImage: image != null,
+          attachmentName: attachmentName,
+          attachmentKind: attachmentKind,
+        ));
+      }
       _busy = true;
       _agentState = AgentTaskState.running;
       _agentError = null;
       _lastAgentRequest = text;
-      _timeline.clear();
-      _taskStart = DateTime.now(); // real start — drives the elapsed label
+      if (!resume) {
+        _taskId = DateTime.now().microsecondsSinceEpoch.toString();
+        _timeline.clear();
+        _resumeContext = null;
+        _taskStart = DateTime.now(); // real start — drives the elapsed label
+      }
       _taskEnd = null;
       _recentSessions = const [];
-      _pendingImage = null;
-      _pendingImageName = null;
+      if (!resume) _clearAttachmentState();
     });
     _input.clear();
     // Persist the task text IMMEDIATELY — backing out mid-run must not
     // erase it (the final save only happens if the run completes on-screen).
     unawaited(_saveSession());
 
-    var effectiveRequest = text;
-    final attachmentContent = _pendingAttachment;
-    final attachmentName = _pendingAttachmentName;
+    var effectiveRequest = resume ? _resumePrompt() : text;
     if (attachmentContent != null) {
       final clipped = attachmentContent.length > 12000
           ? '${attachmentContent.substring(0, 12000)}\n… (truncated)'
           : attachmentContent;
       effectiveRequest = '$text\n\n(Attached file "$attachmentName":\n$clipped\n)';
       setState(() {
-        _pendingAttachment = null;
-        _pendingAttachmentName = null;
+        _clearAttachmentState();
       });
     }
 
@@ -688,6 +784,7 @@ class _ChatScreenState extends State<ChatScreen> {
           } else {
             _timeline.add(StepEntry(e.step));
           }
+          _updateResumeContext();
           // Continuous persistence: every REAL finished step is saved at
           // once, so navigating away can never lose the activity history.
           unawaited(_saveSession());
@@ -721,6 +818,9 @@ class _ChatScreenState extends State<ChatScreen> {
         _agentState = o.state;
         if (o.state == AgentTaskState.failed) _agentError = o.message;
         _taskEnd = DateTime.now(); // real end — freezes the elapsed label
+        _updateResumeContext(
+          interruptedAction: o.state == AgentTaskState.failed ? o.message : null,
+        );
       });
       if (o.state == AgentTaskState.completed) {
         _push('assistant', o.message);
@@ -949,36 +1049,34 @@ class _ChatScreenState extends State<ChatScreen> {
         IconButton(icon: const Icon(Icons.cleaning_services), tooltip: 'Clear this chat', onPressed: () => setState(() { _messages.clear(); _pending.clear(); _sessionId = null; })),
       ]),
       body: Column(children: [
-        if (_pendingAttachmentName != null)
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
-            child: Row(children: [
-              const Icon(Icons.attach_file, size: 16, color: AppTheme.glowAccent),
-              const SizedBox(width: 6),
-              Expanded(
-                child: Text('Attached: $_pendingAttachmentName',
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(color: AppTheme.muted, fontSize: 12)),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+          child: Row(children: [
+            Expanded(
+              child: SegmentedButton<bool>(
+                segments: const [
+                  ButtonSegment<bool>(value: false, label: Text('Chat'), icon: Icon(Icons.chat_bubble_outline, size: 16)),
+                  ButtonSegment<bool>(value: true, label: Text('Project'), icon: Icon(Icons.code, size: 16)),
+                ],
+                selected: {_agentMode},
+                onSelectionChanged: _busy ? null : (selection) => _setProjectMode(selection.first),
+                showSelectedIcon: false,
               ),
-              IconButton(
-                visualDensity: VisualDensity.compact,
-                icon: const Icon(Icons.close, size: 16, color: AppTheme.muted),
-                onPressed: () => setState(() {
-                  _pendingAttachment = null;
-                  _pendingAttachmentName = null;
-                }),
-              ),
-            ]),
-          ),
+            ),
+            const SizedBox(width: 8),
+            Text(_agentMode ? 'Project Mode' : 'Chat Mode',
+                style: TextStyle(color: _agentMode ? AppTheme.glowAccent : AppTheme.muted, fontSize: 11, fontWeight: FontWeight.w600)),
+          ]),
+        ),
         Expanded(
           child: ListView(
             controller: _scroll,
             padding: const EdgeInsets.all(12),
             children: [
               if (_messages.isEmpty)
-                Text(projectService.projectName == null
-                    ? 'Agent mode is ON: give a task like "Fix the login screen and commit".\n\nNo project is open yet — import one with Home → File (ZIP) or Integrations → GitHub.\n\nTap AUTO to switch approval modes; tap ✦ to toggle plain chat.'
-                    : 'Agent mode is ON. Examples:\n• "Find and fix the deprecated API in the search screen, then commit"\n• "Add a dark-mode toggle to settings and open a PR"\n• Tap AUTO to switch approval modes · ✦ for plain chat.',
+                Text(!_agentMode
+                    ? 'Chat Mode is ready. Ask anything, study a topic, or attach a file to discuss it.\n\nProject files are not used unless you switch to Project Mode.'
+                    : 'Project Mode is active. Coding instructions can inspect and modify the open project.\n\nUse Chat Mode for normal questions and study conversations.',
                     style: TextStyle(color: AppTheme.muted)),
               if (_messages.isEmpty && _recentSessions.isNotEmpty)
                 _ResumeCard(
@@ -1021,15 +1119,21 @@ class _ChatScreenState extends State<ChatScreen> {
             child: Column(mainAxisSize: MainAxisSize.min, children: [
               if (_hasPendingAttachment) ...[
                 Row(children: [
-                  Icon(
-                    _pendingImage != null ? Icons.image : Icons.description,
-                    size: 16,
-                    color: AppTheme.glowAccent,
-                  ),
+                  if (_pendingImage != null)
+                    Builder(builder: (context) {
+                      final comma = _pendingImage!.indexOf(',');
+                      final bytes = comma >= 0 ? base64Decode(_pendingImage!.substring(comma + 1)) : null;
+                      return ClipRRect(
+                        borderRadius: BorderRadius.circular(4),
+                        child: bytes == null ? const Icon(Icons.image, size: 28, color: AppTheme.glowAccent) : Image.memory(bytes, width: 32, height: 32, fit: BoxFit.cover),
+                      );
+                    })
+                  else
+                    Icon(_pendingAttachmentKind == 'pdf' ? Icons.picture_as_pdf : _pendingAttachmentKind == 'code' ? Icons.code : Icons.insert_drive_file, size: 22, color: AppTheme.glowAccent),
                   const SizedBox(width: 6),
                   Expanded(
                     child: Text(
-                      'Attached: ${_pendingImageName ?? _pendingAttachmentName}',
+                      '${_pendingImageName ?? _pendingAttachmentName}',
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(color: AppTheme.muted, fontSize: 12),
                     ),
@@ -1074,18 +1178,18 @@ class _ChatScreenState extends State<ChatScreen> {
               ]),
               const SizedBox(height: 2),
               Row(children: [
-                // Agent toggle (✦ = autonomous agent on).
+                // Secondary explicit Project toggle.
                 InkWell(
                   borderRadius: BorderRadius.circular(10),
-                  onTap: () => setState(() => _agentMode = !_agentMode),
+                  onTap: () => _setProjectMode(!_agentMode),
                   child: Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
                     child: Row(mainAxisSize: MainAxisSize.min, children: [
-                      Icon(Icons.auto_awesome,
+                      Icon(Icons.code,
                           size: 14,
                           color: _agentMode ? AppTheme.glowAccent : AppTheme.muted),
                       const SizedBox(width: 4),
-                      Text('Agent',
+                      Text('Project',
                           style: TextStyle(
                               fontSize: 11,
                               color: _agentMode ? AppTheme.glowAccent : AppTheme.muted,
@@ -1189,7 +1293,18 @@ class _ChatScreenState extends State<ChatScreen> {
               ]),
             ),
           if (isUser)
-            Flexible(child: SelectableText(m.content, style: TextStyle(color: m.isError ? AppTheme.err : AppTheme.text)))
+            Flexible(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              if (m.attachmentName != null)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 6),
+                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                    Icon(m.attachmentKind == 'pdf' ? Icons.picture_as_pdf : m.attachmentKind == 'image' ? Icons.image : Icons.insert_drive_file, size: 14, color: AppTheme.glowAccent),
+                    const SizedBox(width: 5),
+                    Flexible(child: Text(m.attachmentName!, overflow: TextOverflow.ellipsis, style: const TextStyle(color: AppTheme.glowAccent, fontSize: 12))),
+                  ]),
+                ),
+              SelectableText(m.content, style: TextStyle(color: m.isError ? AppTheme.err : AppTheme.text)),
+            ]))
           else
             _AssistantBody(content: m.content, isError: m.isError),
         ]),

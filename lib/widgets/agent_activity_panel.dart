@@ -230,7 +230,7 @@ class _AgentActivityPanelState extends State<AgentActivityPanel> {
                   ),
                   onPressed: widget.onRetry,
                   icon: const Icon(Icons.refresh, size: 16),
-                  label: const Text('Retry task'),
+                  label: const Text('Continue from checkpoint'),
                 ),
               ),
             ),

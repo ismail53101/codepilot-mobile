@@ -86,6 +86,12 @@ class ChatMessage {
   /// Whether this message carried an image (persisted for display).
   final bool hasImage;
 
+  /// Compact attachment metadata for the transcript. File contents remain in
+  /// the request only; the visible name/type is enough to avoid duplicating
+  /// large files in persisted chat history.
+  final String? attachmentName;
+  final String? attachmentKind;
+
   /// For assistant messages that requested tool calls (agent loop):
   /// the raw OpenAI tool_calls array to echo back to the provider.
   final List<Map<String, dynamic>>? toolCalls;
@@ -99,6 +105,8 @@ class ChatMessage {
     this.isError = false,
     this.imageDataUrl,
     this.hasImage = false,
+    this.attachmentName,
+    this.attachmentKind,
     this.toolCalls,
     this.toolCallId,
   });
@@ -108,6 +116,8 @@ class ChatMessage {
         'content': content,
         if (isError) 'isError': true,
         if (hasImage) 'hasImage': true,
+        if (attachmentName != null) 'attachmentName': attachmentName,
+        if (attachmentKind != null) 'attachmentKind': attachmentKind,
       };
 
   factory ChatMessage.fromJson(Map<String, dynamic> j) => ChatMessage(
@@ -115,6 +125,8 @@ class ChatMessage {
         content: (j['content'] as String?) ?? '',
         isError: (j['isError'] as bool?) ?? false,
         hasImage: (j['hasImage'] as bool?) ?? false,
+        attachmentName: j['attachmentName'] as String?,
+        attachmentKind: j['attachmentKind'] as String?,
       );
 }
 
