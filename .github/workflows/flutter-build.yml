@@ -28,10 +28,6 @@ jobs:
               <foreground android:drawable="@drawable/codefexa_logo" />
           </adaptive-icon>
           EOF
-          cat > android/app/src/main/res/values/codefexa_colors.xml <<'EOF'
-          <?xml version="1.0" encoding="utf-8"?>
-          <resources><color name="codefexa_icon_background">#07111F</color></resources>
-          EOF
           cat > android/app/src/main/res/drawable/launch_background.xml <<'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
