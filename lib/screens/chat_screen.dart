@@ -322,7 +322,7 @@ class _ChatScreenState extends State<ChatScreen> {
       // Mark the thread honestly: the agent was cancelled because the user
       // left the screen. Without this the reopened chat would show the task
       // text with no explanation of what happened to it.
-      _messages.add(const ChatMessage(
+      _messages.add(ChatMessage(
         role: 'system',
         content: '⏹ Task stopped — you left this screen while the agent was '
             'working. Send the task again (or use Retry) to continue.',
@@ -822,7 +822,7 @@ class _ChatScreenState extends State<ChatScreen> {
           ? _messages.sublist(_messages.length - 10)
           : _messages;
       final messages = <ChatMessage>[
-        const ChatMessage(role: 'system', content: AgentService.systemPrompt),
+        ChatMessage(role: 'system', content: AgentService.systemPrompt),
         ChatMessage(role: 'user', content: context),
         ...history.map((m) => ChatMessage(
               role: m.role == 'system' ? 'assistant' : m.role,
@@ -1308,7 +1308,14 @@ class _ChatScreenState extends State<ChatScreen> {
                   onResume: _resumePrevious,
                   onDismiss: () => setState(() => _recentSessions = const []),
                 ),
-              for (final m in _messages) _bubble(m),
+              // Stable per-message keys: Flutter matches old/new elements by
+              // key, so streaming updates elsewhere (stream bubble, activity
+              // panel, timer ticks) rebuild but never REMOUNT these bubbles —
+              // and their image attachments never re-resolve. Never key by
+              // list index here: list-shape changes during a run would
+              // otherwise swap element identities and reload images.
+              for (final m in _messages)
+                _bubble(m, key: ValueKey('msg-${m.id}')),
               if (_timeline.isNotEmpty || _agentState != AgentTaskState.idle)
                 AgentActivityPanel(
                   timeline: _timeline,
@@ -1327,7 +1334,15 @@ class _ChatScreenState extends State<ChatScreen> {
                       ? () => openProjectPreview(context)
                       : null,
                 ),
-              if (_streamBuf != null) _bubble(ChatMessage(role: 'assistant', content: '$_streamBuf▍')),
+              // The streaming bubble lives OUTSIDE the keyed transcript list:
+              // it is rebuilt every token, which would otherwise be the one
+              // list child that churns. Its key is stable across the whole
+              // stream so its own element identity never changes either.
+              if (_streamBuf != null)
+                _bubble(
+                  ChatMessage(role: 'assistant', content: '$_streamBuf▍'),
+                  key: const ValueKey('stream-bubble'),
+                ),
               if (_busy && _streamBuf == null && _agentState == AgentTaskState.idle)
                 const Padding(
                   padding: EdgeInsets.all(8),
@@ -1473,9 +1488,10 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  Widget _bubble(ChatMessage m) {
+  Widget _bubble(ChatMessage m, {Key? key}) {
     final isUser = m.role == 'user';
     return Align(
+      key: key,
       alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
       child: Container(
         margin: const EdgeInsets.symmetric(vertical: 4),
@@ -1488,27 +1504,16 @@ class _ChatScreenState extends State<ChatScreen> {
         ),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
           if (m.hasImage && m.imageDataUrl != null) ...[
-            Builder(builder: (context) {
-              // Data URL: data:image/png;base64,<payload>
-              final comma = m.imageDataUrl!.indexOf(',');
-              final bytes = comma >= 0 && comma < m.imageDataUrl!.length - 1
-                  ? base64Decode(m.imageDataUrl!.substring(comma + 1))
-                  : null;
-              if (bytes == null) return const SizedBox.shrink();
-              return GestureDetector(
-                onTap: () => _showImageViewer(bytes, m.attachmentName),
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(11),
-                  child: Image.memory(
-                    bytes,
-                    width: 120,
-                    height: 120,
-                    fit: BoxFit.cover,
-                    errorBuilder: (_, __, ___) => const SizedBox.shrink(),
-                  ),
-                ),
-              );
-            }),
+            // Stable attachment widget: keyed by the message's stable id, it
+            // decodes the bytes ONCE in initState and caches the ImageProvider
+            // — streaming/reasoning/timer updates rebuild nothing in here.
+            // Tap opens the full-screen viewer using the SAME cached bytes.
+            _AttachmentThumb(
+              key: ValueKey('img-${m.id}'),
+              dataUrl: m.imageDataUrl!,
+              name: m.attachmentName,
+              onOpenImage: (bytes) => _showImageViewer(bytes, m.attachmentName),
+            ),
             const SizedBox(height: 8),
           ] else if (m.hasImage)
             const Padding(
@@ -2080,5 +2085,109 @@ class _ResumeCard extends StatelessWidget {
         ),
       ]),
     );
+  }
+}
+
+/// STABLE image attachment.
+///
+/// Renders an attached image exactly once and then never churns:
+/// - The base64 data-URL is decoded ONCE, in [initState] — never per build.
+/// - The resulting [MemoryImage] provider is cached in state, so every
+///   rebuild after a streaming token, reasoning update or timer tick hands
+///   Flutter the SAME provider instance. An unchanged provider means the
+///   image stream is not re-subscribed, the pixels are not re-decoded, and
+///   the element is not remounted — the picture physically cannot blink.
+/// - The 140x140 frame is reserved up front, so nothing shifts when the
+///   pixels arrive and the surrounding layout is static during a run.
+///
+/// The parent MUST key this widget with the message's stable id (see
+/// `_bubble`) — identity by key, never by list index or streaming state.
+class _AttachmentThumb extends StatefulWidget {
+  final String dataUrl;
+
+  /// Optional attachment display name (shown in the viewer tooltip).
+  final String? name;
+
+  /// Invoked with the decoded bytes when the thumbnail is tapped — opens the
+  /// full-screen viewer without re-decoding anything.
+  final ValueChanged<Uint8List>? onOpenImage;
+
+  const _AttachmentThumb({
+    super.key,
+    required this.dataUrl,
+    this.name,
+    this.onOpenImage,
+  });
+
+  @override
+  State<_AttachmentThumb> createState() => _AttachmentThumbState();
+}
+
+class _AttachmentThumbState extends State<_AttachmentThumb> {
+  static const _thumbSide = 140.0;
+
+  /// Cached ONCE. Dart image codecs are synchronous-safe here: `base64Decode`
+  /// plus `instantiateImageCodec` run off the render path and the provider is
+  /// created before the first frame that shows the picture.
+  MemoryImage? _provider;
+  Uint8List? _bytes;
+
+  @override
+  void initState() {
+    super.initState();
+    _provider = _decode();
+  }
+
+  MemoryImage? _decode() {
+    // Data URL: data:image/png;base64,<payload>
+    final comma = widget.dataUrl.indexOf(',');
+    if (comma < 0 || comma >= widget.dataUrl.length - 1) return null;
+    try {
+      final bytes = base64Decode(widget.dataUrl.substring(comma + 1));
+      _bytes = bytes;
+      return MemoryImage(bytes);
+    } on FormatException {
+      return null;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final provider = _provider;
+    final bytes = _bytes;
+    final thumb = Container(
+      width: _thumbSide,
+      height: _thumbSide,
+      clipBehavior: Clip.antiAlias,
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: AppTheme.border),
+        color: AppTheme.surface,
+      ),
+      // gaplessPlayback has no effect once the provider never changes, but it
+      // guarantees zero flash even IF a future change swaps providers.
+      child: provider == null
+          ? const Center(
+              child: Icon(Icons.broken_image_outlined,
+                  size: 28, color: AppTheme.muted))
+          : Image(
+              image: provider,
+              width: _thumbSide,
+              height: _thumbSide,
+              fit: BoxFit.cover,
+              gaplessPlayback: true,
+              errorBuilder: (_, __, ___) => const Center(
+                child: Icon(Icons.broken_image_outlined,
+                    size: 28, color: AppTheme.muted),
+              ),
+            ),
+    );
+    final tappable = widget.onOpenImage != null && bytes != null;
+    return tappable
+        ? GestureDetector(
+            onTap: () => widget.onOpenImage!(bytes),
+            child: thumb,
+          )
+        : thumb;
   }
 }

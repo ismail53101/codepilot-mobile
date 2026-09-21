@@ -80,6 +80,13 @@ class ChatMessage {
   final String content;
   final bool isError;
 
+  /// Stable unique identity for this message. Created once when the message
+  /// is added and NEVER mutated afterwards — it keys the message bubble and
+  /// its attachment widgets so streaming updates elsewhere in the screen can
+  /// rebuild (even the same list slot) without remounting the image element.
+  /// Persisted so a restored transcript keeps the same identity too.
+  final String id;
+
   /// Base64 data-URL of an attached image (vision requests). Transient:
   /// intentionally NOT serialized — session storage would overflow with
   /// full images, so restored transcripts keep the [hasImage] marker only.
@@ -101,7 +108,7 @@ class ChatMessage {
   /// For role=tool messages: the tool_call_id this result answers.
   final String? toolCallId;
 
-  const ChatMessage({
+  ChatMessage({
     required this.role,
     required this.content,
     this.isError = false,
@@ -111,11 +118,21 @@ class ChatMessage {
     this.attachmentKind,
     this.toolCalls,
     this.toolCallId,
-  });
+    String? id,
+  }) : id = id ??
+            // Time-derived + process-wide counter: unique within the app run
+            // and effectively collision-free across restarts.
+            'm${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}'
+                '${(++_idSeq).toRadixString(36)}';
+
+  /// Monotonic suffix counter so two messages created in the same
+  /// microsecond still get different ids.
+  static int _idSeq = 0;
 
   Map<String, dynamic> toJson() => {
         'role': role,
         'content': content,
+        'id': id,
         if (isError) 'isError': true,
         if (hasImage) 'hasImage': true,
         if (attachmentName != null) 'attachmentName': attachmentName,
@@ -129,6 +146,7 @@ class ChatMessage {
         hasImage: (j['hasImage'] as bool?) ?? false,
         attachmentName: j['attachmentName'] as String?,
         attachmentKind: j['attachmentKind'] as String?,
+        id: j['id'] as String?,
       );
 }
 
