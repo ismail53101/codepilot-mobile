@@ -38,8 +38,10 @@ class ChatScreen extends StatefulWidget {
 class _ChatScreenState extends State<ChatScreen> {
   final _input = TextEditingController();
   final _scroll = ScrollController();
-  bool _manualScrollActive = false;
-  bool _userNearBottom = true;
+  static const double _bottomThreshold = 130;
+  bool _isUserNearBottom = true;
+  bool _shouldAutoScroll = true;
+  bool _scrollRequestPending = false;
   final List<ChatMessage> _messages = [];
   List<ProposedChange> _pending = [];
   bool _busy = false;
@@ -251,7 +253,7 @@ class _ChatScreenState extends State<ChatScreen> {
         _restoreActivity(chosen.activity);
       }
     });
-    _scrollDown();
+    _scrollToBottom(force: true);
   }
 
   Future<void> _setProjectMode(bool project) async {
@@ -341,6 +343,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _approvalSub?.cancel();
     _outcomeSub?.cancel();
     _input.dispose();
+    _scroll.removeListener(_handleScroll);
     _scroll.dispose();
     super.dispose();
   }
@@ -351,6 +354,7 @@ class _ChatScreenState extends State<ChatScreen> {
     // Chat is always the safe default. A project becomes conversation context
     // only after the user explicitly switches mode and opens/selects it.
     _agentMode = false;
+    _scroll.addListener(_handleScroll);
     WidgetsBinding.instance.addPostFrameCallback((_) => _initFromRoute());
   }
 
@@ -458,7 +462,7 @@ class _ChatScreenState extends State<ChatScreen> {
       _input.text = routeQuery;
       await _send(); // _send() clears _input after queueing the message
     } else {
-      _scrollDown();
+      _scrollToBottom(force: true);
     }
   }
 
@@ -710,7 +714,7 @@ class _ChatScreenState extends State<ChatScreen> {
         _restoreActivity(chosen.activity);
       });
       await _saveSession();
-      _scrollDown();
+      _scrollToBottom(force: true);
     }
   }
 
@@ -765,7 +769,7 @@ class _ChatScreenState extends State<ChatScreen> {
       _agentError = null;
       _restoreActivity(chosen.activity);
     });
-    _scrollDown();
+    _scrollToBottom(force: true);
   }
 
   /// One-tap retry of the last agent task after a failure or stop.
@@ -797,6 +801,7 @@ class _ChatScreenState extends State<ChatScreen> {
       _clearAttachmentState();
     });
     _input.clear();
+    _scrollToBottom(force: true);
     // Persist immediately (same mid-run-back-out protection as agent mode).
     unawaited(_saveSession());
 
@@ -838,6 +843,7 @@ class _ChatScreenState extends State<ChatScreen> {
         buf.write(piece);
         if (!mounted) return; // user left the screen — stop stream updates
         setState(() => _streamBuf = buf.toString());
+        _scrollToBottom();
       }
       reply = buf.toString();
       if (!mounted) return;
@@ -849,7 +855,7 @@ class _ChatScreenState extends State<ChatScreen> {
         _messages.add(ChatMessage(role: 'assistant', content: parsed.explanation.isEmpty ? '(model reply contained only change blocks)' : parsed.explanation));
         _pending = parsed.changes;
       });
-      _scrollDown();
+      _scrollToBottom();
       await _saveSession();
     } on ApiException catch (e) {
       // Keep the text in the composer so one tap on send retries the
@@ -869,14 +875,14 @@ class _ChatScreenState extends State<ChatScreen> {
           _streamBuf = null;
         });
       }
-      _scrollDown();
+      _scrollToBottom();
     }
   }
 
   void _push(String role, String content, {bool isError = false}) {
     if (!mounted) return; // async caller may outlive the screen
     setState(() => _messages.add(ChatMessage(role: role, content: content, isError: isError)));
-    _scrollDown();
+    _scrollToBottom();
   }
 
   // ==================================================================
@@ -919,6 +925,7 @@ class _ChatScreenState extends State<ChatScreen> {
       if (!resume) _clearAttachmentState();
     });
     _input.clear();
+    if (!resume) _scrollToBottom(force: true);
     if (resume) _push('system', 'Resuming from checkpoint…');
     // Persist the task text IMMEDIATELY — backing out mid-run must not
     // erase it (the final save only happens if the run completes on-screen).
@@ -970,7 +977,7 @@ class _ChatScreenState extends State<ChatScreen> {
           unawaited(_saveSession());
         }
       });
-      _scrollDown();
+      _scrollToBottom();
     });
     _thoughtSub = loop.thoughts.listen((t) {
       if (!mounted) return;
@@ -980,6 +987,7 @@ class _ChatScreenState extends State<ChatScreen> {
         if (last is ReasoningEntry && last.text == t.text) return;
         _timeline.add(ReasoningEntry(t.text));
       });
+      _scrollToBottom();
     });
     _approvalSub = loop.approvals.listen((a) async {
       final approved = await _askApproval(a.tool, a.args);
@@ -1009,7 +1017,7 @@ class _ChatScreenState extends State<ChatScreen> {
       } else if (o.state == AgentTaskState.cancelled) {
         _push('system', '⏹ Task stopped.');
       }
-      _scrollDown();
+      _scrollToBottom();
     });
 
     try {
@@ -1077,7 +1085,7 @@ class _ChatScreenState extends State<ChatScreen> {
           }
         });
       }
-      _scrollDown();
+      _scrollToBottom();
     }
   }
 
@@ -1151,15 +1159,28 @@ class _ChatScreenState extends State<ChatScreen> {
         AgentMode.planOnly => 'PLAN',
       };
 
-  void _scrollDown() {
-    // Do not interrupt manual scrolling or an older-message view. Image
-    // decoding and streaming updates are ordinary list updates, not scroll
-    // targets; only follow new content when already near the bottom.
-    if (_manualScrollActive || !_userNearBottom) return;
+  void _handleScroll() {
+    if (!_scroll.hasClients) return;
+    final nearBottom = _scroll.position.extentAfter <= _bottomThreshold;
+    if (_isUserNearBottom == nearBottom && _shouldAutoScroll == nearBottom) return;
+    _isUserNearBottom = nearBottom;
+    // Moving away from the bottom is an explicit signal that the user is
+    // reading older messages. Never pull them back down during streaming.
+    _shouldAutoScroll = nearBottom;
+  }
+
+  void _scrollToBottom({bool force = false}) {
+    if (!force && (!_shouldAutoScroll || !_isUserNearBottom)) return;
+    if (_scrollRequestPending && !force) return;
+    _scrollRequestPending = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_manualScrollActive || !_userNearBottom || !_scroll.hasClients) return;
-      _scroll.animateTo(_scroll.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 250), curve: Curves.easeOut);
+      _scrollRequestPending = false;
+      if (!_scroll.hasClients || (!force && (!_shouldAutoScroll || !_isUserNearBottom))) return;
+      final target = _scroll.position.maxScrollExtent;
+      if ((target - _scroll.position.pixels).abs() <= 1) return;
+      _scroll.jumpTo(target);
+      _isUserNearBottom = true;
+      _shouldAutoScroll = true;
     });
   }
 
@@ -1273,18 +1294,7 @@ class _ChatScreenState extends State<ChatScreen> {
           ]),
         ),
         Expanded(
-          child: NotificationListener<ScrollNotification>(
-            onNotification: (notification) {
-              if (notification is UserScrollNotification) {
-                _manualScrollActive = true;
-                _userNearBottom = notification.metrics.extentAfter <= 120;
-              } else if (notification is ScrollEndNotification) {
-                _manualScrollActive = false;
-                _userNearBottom = notification.metrics.extentAfter <= 120;
-              }
-              return false;
-            },
-            child: ListView(
+          child: ListView(
               controller: _scroll,
               padding: const EdgeInsets.all(12),
               children: [
@@ -1326,7 +1336,6 @@ class _ChatScreenState extends State<ChatScreen> {
                 ),
               for (var i = 0; i < _pending.length; i++) _pendingCard(i),
               ],
-            ),
           ),
         ),
         SafeArea(
