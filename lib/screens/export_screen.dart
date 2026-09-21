@@ -48,7 +48,7 @@ class _ExportScreenState extends State<ExportScreen> {
     if (_path == null) return;
     final box = context.findRenderObject() as RenderBox?;
     if (box == null) return;
-    await Share.shareXFiles([XFile(_path!)], subject: 'CodePilot export', sharePositionOrigin: box.localToGlobal(Offset.zero) & box.size);
+    await Share.shareXFiles([XFile(_path!)], subject: 'CodeFexa export', sharePositionOrigin: box.localToGlobal(Offset.zero) & box.size);
   }
 
   @override

@@ -11,7 +11,7 @@ enum ComposerMode { ask, search }
 /// reference layout:
 ///
 ///   ╭──────────────────────────────────────────╮
-///   │ ⚡  Ask CodePilot…                   (↑)  │  ← input row + blue send
+///   │ ⚡  Ask CodeFexa…                   (↑)  │  ← input row + blue send
 ///   │ ──────────────────────────────────────── │  ← hairline divider
 ///   │ 📎 File │ ✨Ask  🔍Search        🔗Integrate│  ← actions row
 ///   ╰──────────────────────────────────────────╯
@@ -140,7 +140,7 @@ class _ComposerInput extends StatelessWidget {
                   color: AppTheme.text, fontSize: 15, height: 1.35),
               cursorColor: AppTheme.glowAccent,
               decoration: const InputDecoration(
-                hintText: 'Ask CodePilot…',
+                hintText: 'Ask CodeFexa…',
                 hintStyle: TextStyle(fontSize: 15),
                 border: InputBorder.none,
                 isDense: true,

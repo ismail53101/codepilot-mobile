@@ -505,7 +505,7 @@ class ToolRegistry {
           final result = await github.commitTree(
             repo: repo,
             branch: branch,
-            message: args['message'] as String? ?? 'CodePilot update',
+            message: args['message'] as String? ?? 'CodeFexa update',
             files: _snapshotFiles(),
           );
           await projects.updateManifest({
@@ -567,7 +567,7 @@ class ToolRegistry {
           'required': ['message'],
         },
         execute: (args, {cancelToken}) => execute('git_commit', {
-          'message': args['message'] ?? 'CodePilot: push from mobile',
+          'message': args['message'] ?? 'CodeFexa: push from mobile',
         }),
       );
 

@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import '../theme.dart';
 import 'overflow_menu.dart';
 
-/// CodePilot wordmark header: "Code" in light gray/white, "Pilot" in the
+/// CodeFexa wordmark header: "Code" in light gray/white, "Pilot" in the
 /// electric-blue accent, then three compact glowing controls on the right:
 ///
 ///   [+] Create Project   [🔑 gold key → API keys]   [⋮ overflow menu]
@@ -35,7 +35,10 @@ class CodePilotHeader extends StatelessWidget {
           child: FittedBox(
             fit: BoxFit.scaleDown,
             alignment: Alignment.centerLeft,
-            child: Text.rich(
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              Image.asset('assets/codefexa_logo.png', width: 30, height: 30),
+              const SizedBox(width: 7),
+              Text.rich(
               const TextSpan(
                 children: [
                   TextSpan(
@@ -48,7 +51,7 @@ class CodePilotHeader extends StatelessWidget {
                     ),
                   ),
                   TextSpan(
-                    text: 'Pilot',
+                    text: 'Fexa',
                     style: TextStyle(
                       color: AppTheme.glowAccent,
                       fontSize: 34,
@@ -58,9 +61,10 @@ class CodePilotHeader extends StatelessWidget {
                   ),
                 ],
               ),
-              key: ValueKey('codepilot_wordmark'),
+              key: ValueKey('codefexa_wordmark'),
               maxLines: 1,
-            ),
+              ),
+            ]),
           ),
         ),
         const Spacer(),

@@ -181,7 +181,7 @@ class OpenAiCompatibleBackend extends AiProviderBackend
         'Content-Type': 'application/json',
         // OpenRouter attribution (optional, ignored by other providers).
         'HTTP-Referer': 'https://codepilot.app',
-        'X-Title': 'CodePilot Mobile',
+        'X-Title': 'CodeFexa Mobile',
       };
 
   Map<String, dynamic> _body(List<ChatMessage> messages,

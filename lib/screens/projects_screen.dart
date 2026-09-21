@@ -120,7 +120,7 @@ class _ProjectsScreenState extends State<ProjectsScreen> {
                                   fontWeight: FontWeight.w600)),
                           const SizedBox(height: 6),
                           const Text(
-                              'Create a new project or import a ZIP to start working with the CodePilot agent.',
+                              'Create a new project or import a ZIP to start working with the CodeFexa agent.',
                               textAlign: TextAlign.center,
                               style: TextStyle(color: AppTheme.muted)),
                           const SizedBox(height: 16),

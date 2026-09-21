@@ -441,7 +441,7 @@ class _EmailOtpSheetState extends State<EmailOtpSheet> {
             const SizedBox(height: 6),
             Text(
               _done
-                  ? 'Your email is linked to CodePilot.'
+                  ? 'Your email is linked to CodeFexa Mobile.'
                   : _codeSent
                       ? 'We sent a 6-digit code to ${_email.text.trim()}'
                       : 'We\'ll email you a one-time code — no password needed.',

@@ -58,7 +58,7 @@ class CodePilotApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'CodePilot',
+      title: 'CodeFexa Mobile',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.dark(),
       initialRoute: '/',

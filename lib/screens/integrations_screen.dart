@@ -31,7 +31,7 @@ class _IntegrationsScreenState extends State<IntegrationsScreen> {
             padding: const EdgeInsets.all(16),
             children: [
               Text(
-                'Connect CodePilot to your repositories and cloud storage. '
+                'Connect CodeFexa Mobile to your repositories and cloud storage. '
                 'Connected providers unlock import and export from the Home command bar.',
                 style: TextStyle(color: AppTheme.muted, fontSize: 13),
               ),

@@ -1075,7 +1075,7 @@ class _ChatScreenState extends State<ChatScreen> {
       final box = context.findRenderObject() as RenderBox?;
       await Share.shareXFiles(
         [XFile(path)],
-        subject: '${projectService.projectName} — CodePilot export',
+        subject: '${projectService.projectName} — CodeFexa export',
         sharePositionOrigin: box == null
             ? null
             : box.localToGlobal(Offset.zero) & box.size,

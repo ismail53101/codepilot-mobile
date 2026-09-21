@@ -52,7 +52,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ]),
         const SizedBox(height: 16),
         Card(color: AppTheme.surface2, child: Padding(padding: const EdgeInsets.all(14), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: const [
-          Text('About CodePilot Mobile', style: TextStyle(fontWeight: FontWeight.w600)),
+          Text('About CodeFexa Mobile', style: TextStyle(fontWeight: FontWeight.w600)),
           SizedBox(height: 6),
           Text('AI coding agent for Android. Works with any OpenAI-compatible API '
               '(default: xKiro, qwen/qwen3.7-flash:free). Projects are imported from ZIP '

@@ -650,7 +650,7 @@ class ProjectTemplate {
     dirs: ['lib', 'lib/screens', 'test'],
     files: [
       TemplateFile('pubspec.yaml', '''name: __PROJECT_NAME__
-description: A Flutter project created with CodePilot.
+description: A Flutter project created with CodeFexa Mobile.
 publish_to: "none"
 version: 1.0.0+1
 
@@ -743,7 +743,7 @@ void main() {
     dirs: ['lib/src', 'test'],
     files: [
       TemplateFile('pubspec.yaml', '''name: __PROJECT_NAME__
-description: A reusable Flutter package created with CodePilot.
+description: A reusable Flutter package created with CodeFexa Mobile.
 version: 0.1.0
 
 environment:
@@ -838,7 +838,7 @@ dependencies {
   static const webProject = ProjectTemplate(
     id: 'web',
     label: 'HTML/CSS/JavaScript',
-    description: 'Static web page — live-previewable in CodePilot',
+    description: 'Static web page — live-previewable in CodeFexa Mobile',
     icon: Icons.code,
     dirs: ['assets'],
     files: [
@@ -853,7 +853,7 @@ dependencies {
 <body>
   <main class="card">
     <h1>__PROJECT_NAME__</h1>
-    <p>Edit this page or ask the CodePilot agent to build it out.</p>
+    <p>Edit this page or ask the CodeFexa agent to build it out.</p>
     <button id="cta">Tap me</button>
   </main>
   <script src="script.js"></script>
@@ -949,7 +949,7 @@ createRoot(document.getElementById('root')).render(<App />);
   return (
     <main style={{ fontFamily: 'system-ui', padding: 32 }}>
       <h1>__PROJECT_NAME__</h1>
-      <p>Edit src/App.jsx or ask the CodePilot agent.</p>
+      <p>Edit src/App.jsx or ask the CodeFexa agent.</p>
     </main>
   );
 }

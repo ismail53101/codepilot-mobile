@@ -65,9 +65,9 @@ class EmailOtpService {
           'Content-Type': 'application/json',
         },
         body: jsonEncode({
-          'from': 'CodePilot <onboarding@resend.dev>',
+          'from': 'CodeFexa Mobile <onboarding@resend.dev>',
           'to': [trimmed],
-          'subject': 'Your CodePilot sign-in code',
+          'subject': 'Your CodeFexa Mobile sign-in code',
           'html': _otpEmailHtml(code),
         }),
       );
@@ -106,7 +106,7 @@ class EmailOtpService {
 <html>
   <body style="margin:0;padding:24px;background:#0d1117;font-family:sans-serif;">
     <div style="max-width:420px;margin:0 auto;background:#161b22;border:1px solid #30363d;border-radius:12px;padding:28px;text-align:center;">
-      <h2 style="color:#e6edf3;margin:0 0 8px;">CodePilot sign-in</h2>
+      <h2 style="color:#e6edf3;margin:0 0 8px;">CodeFexa Mobile sign-in</h2>
       <p style="color:#8b949e;font-size:13px;margin:0 0 20px;">Use this code to finish signing in:</p>
       <div style="font-size:32px;font-weight:700;letter-spacing:8px;color:#3b82f6;">$code</div>
       <p style="color:#8b949e;font-size:12px;margin:20px 0 0;">This code expires in 10 minutes. If you didn't request it, you can ignore this email.</p>
@@ -375,12 +375,12 @@ class GitHubService {
       if (existing.statusCode == 200) sha = (jsonDecode(existing.body) as Map)['sha'] as String?;
       if (change.kind == 'delete') {
         if (sha == null) continue;
-        final body = {'message': 'CodePilot: delete ${change.path}', 'sha': sha, 'branch': repo.defaultBranch};
+        final body = {'message': 'CodeFexa: delete ${change.path}', 'sha': sha, 'branch': repo.defaultBranch};
         final response = await http.delete(endpoint, headers: {...headers, 'Content-Type': 'application/json'}, body: jsonEncode(body));
         if (response.statusCode != 200) throw GitHubException(_error(response));
       } else {
         final content = change.contentAfter ?? '';
-        final body = {'message': 'CodePilot: update ${change.path}', 'content': base64Encode(utf8.encode(content)), 'branch': repo.defaultBranch, if (sha != null) 'sha': sha};
+        final body = {'message': 'CodeFexa: update ${change.path}', 'content': base64Encode(utf8.encode(content)), 'branch': repo.defaultBranch, if (sha != null) 'sha': sha};
         final response = await http.put(endpoint, headers: {...headers, 'Content-Type': 'application/json'}, body: jsonEncode(body));
         if (response.statusCode != 200 && response.statusCode != 201) throw GitHubException(_error(response));
       }

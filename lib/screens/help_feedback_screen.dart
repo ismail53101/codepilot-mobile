@@ -91,7 +91,7 @@ class HelpFeedbackScreen extends StatelessWidget {
           const SizedBox(height: 24),
           Center(
             child: Text(
-              'CodePilot Mobile v1.0.0',
+              'CodeFexa Mobile v1.0.0',
               style: TextStyle(color: AppTheme.muted, fontSize: 12),
             ),
           ),
