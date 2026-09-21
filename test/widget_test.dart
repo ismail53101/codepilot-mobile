@@ -20,15 +20,15 @@ void main() {
     );
   });
 
-  testWidgets('CodePilot app starts with minimal home screen', (tester) async {
+  testWidgets('CodeFexa app starts with minimal home screen', (tester) async {
     await tester.pumpWidget(const CodePilotApp());
     // The wordmark is rendered as a two-tone rich-text span.
     final wordmark = tester.widget<Text>(
-        find.byKey(const ValueKey('codepilot_wordmark')));
+        find.byKey(const ValueKey('codefexa_wordmark')));
     final spans = (wordmark.textSpan! as TextSpan).children!;
     expect(spans.length, 2);
     expect((spans[0] as TextSpan).text, 'Code');
-    expect((spans[1] as TextSpan).text, 'Pilot');
+    expect((spans[1] as TextSpan).text, 'Fexa');
     // Unified composer: quiet actions row + circular send button.
     expect(find.text('File'), findsOneWidget);
     expect(find.text('Integrate'), findsOneWidget);
@@ -98,7 +98,7 @@ void main() {
 
   testWidgets('typing a command shows the composer input', (tester) async {
     await tester.pumpWidget(const CodePilotApp());
-    expect(find.text('Ask CodePilot…'), findsOneWidget);
+    expect(find.text('Ask CodeFexa…'), findsOneWidget);
     await tester.enterText(find.byType(TextField), 'Find the login screen');
     await tester.pump();
     expect(find.text('Find the login screen'), findsOneWidget);
