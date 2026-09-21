@@ -38,25 +38,43 @@ jobs:
           test -x "$SDKMANAGER"
           yes | "$SDKMANAGER" --licenses >/dev/null || true
           "$SDKMANAGER" "platforms;android-36" "build-tools;36.0.0"
-          sed -i 's/compileSdk = flutter.compileSdkVersion/compileSdk = 36/' android/app/build.gradle
-          sed -i 's/compileSdk flutter.compileSdkVersion/compileSdk 36/' android/app/build.gradle
+          # Newer Flutter generates the Kotlin-DSL build.gradle.kts; older
+          # ones generate Groovy build.gradle. Patch whichever exists so the
+          # step can never fail with "can't read build.gradle" again.
+          if [ -f android/app/build.gradle.kts ]; then
+            sed -i 's/compileSdk = flutter.compileSdkVersion/compileSdk = 36/' android/app/build.gradle.kts
+            sed -i 's/compileSdk flutter.compileSdkVersion/compileSdk 36/' android/app/build.gradle.kts
+          elif [ -f android/app/build.gradle ]; then
+            sed -i 's/compileSdk = flutter.compileSdkVersion/compileSdk = 36/' android/app/build.gradle
+            sed -i 's/compileSdk flutter.compileSdkVersion/compileSdk 36/' android/app/build.gradle
+          fi
 
       - name: Apply CodeFexa Android branding
         run: |
           mkdir -p android/app/src/main/res/drawable
           cp assets/codefexa_logo.png android/app/src/main/res/drawable/codefexa_logo.png
           sed -i 's/android:label="codepilot_mobile"/android:label="CodeFexa Mobile"/' android/app/src/main/AndroidManifest.xml
-          sed -i 's#android:icon="@mipmap/ic_launcher"#android:icon="@drawable/codefexa_logo"#' android/app/src/main/AndroidManifest.xml
+          sed -i 's#android:icon="@mipmap/ic_launcher"#android:icon="@drawable/codefexa_logo"#' android/app/src/main/AndroidManifest.xml || true
 
       - name: Get dependencies
         run: flutter pub get
 
       - name: Decode Android keystore
         run: |
-          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > android/upload-keystore.jks
+          # Signing is optional: without repository secrets the build falls
+          # back to debug signing (fine for sideloading) instead of failing.
+          if [ -n "${{ secrets.KEYSTORE_BASE64 }}" ]; then
+            echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > android/upload-keystore.jks
+          else
+            echo "No KEYSTORE_BASE64 secret — building debug-signed APK."
+          fi
 
       - name: Create key.properties
         run: |
+          if [ ! -n "${{ secrets.KEYSTORE_BASE64 }}" ]; then
+            echo "Skipping key.properties (no signing secrets)."
+            exit 0
+          fi
           cat > android/key.properties <<EOF
           storePassword=${{ secrets.KEYSTORE_PASSWORD }}
           keyPassword=${{ secrets.KEY_PASSWORD }}
