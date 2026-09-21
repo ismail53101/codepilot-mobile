@@ -709,7 +709,13 @@ class GitHubProjectStore {
   static const _branch = 'github_repo_branch';
 
   final SettingsStore store;
-  GitHubProjectStore(this.store);
+
+  /// Optional project service: when set, [resolveForActiveProject] can
+  /// fall back to the ACTIVE PROJECT's own manifest link and recover the
+  /// link from an imported zipball layout, keeping every consumer (publish
+  /// button, agent git tools, Explorer) on one canonical source of truth.
+  final ProjectService? projects;
+  GitHubProjectStore(this.store, {this.projects});
 
   Future<GitHubRepo?> load() async {
     final values = await store.loadGitHubProject();
@@ -719,6 +725,76 @@ class GitHubProjectStore {
 
   Future<void> save(GitHubRepo repo) => store.saveGitHubProject(repo.owner, repo.name, repo.defaultBranch);
   Future<void> clear() => store.clearGitHubProject();
+
+  /// CANONICAL repository for the ACTIVE PROJECT, tried in order:
+  /// 1. The GitHub integration's saved repository — the user's most recent
+  ///    explicit choice. It WINS and is written INTO the project manifest
+  ///    automatically, so the active project's remote is always refreshed
+  ///    to match the integration.
+  /// 2. Recovery from an imported zipball layout (single visible root
+  ///    folder `owner-repo-sha`) — verified against the API when possible
+  ///    and persisted (integration prefs + project manifest) so the next
+  ///    lookup is instant.
+  /// 3. Nothing found: a stale project-manifest link (e.g. left over after
+  ///    Integrations → disconnect) is cleared rather than trusted, and
+  ///    null is returned. Callers show one honest "not connected" error.
+  Future<GitHubRepo?> resolveForActiveProject() async {
+    final svc = projects;
+    if (svc == null || svc.projectName == null) return load();
+
+    // 1. The integration's repository — sync it INTO the project manifest.
+    final integration = await load();
+    if (integration != null) {
+      await svc.linkGitHubRepo(
+          integration.owner, integration.name,
+          branch: integration.defaultBranch);
+      return integration;
+    }
+
+    // 2. Recover from the imported files themselves.
+    final recovered =
+        githubRepoFromZipballLayout(svc.rootEntryNames);
+    if (recovered != null) {
+      GitHubRepo verified = recovered;
+      try {
+        verified = await GitHubService(store).fetchRepoDetails(recovered);
+      } on GitHubException {
+        // Offline / token missing: the parsed identity is still the best
+        // available truth — publish will surface a specific error if wrong.
+      }
+      await save(verified);
+      await svc.linkGitHubRepo(
+          verified.owner, verified.name,
+          branch: verified.defaultBranch);
+      return verified;
+    }
+
+    // 3. Genuinely no repository context — drop any stale project link.
+    await svc.updateManifest({'gitRepository': null, 'gitBranch': null});
+    return null;
+  }
+
+  /// Re-derive and persist the repository link for the active project.
+  /// Called when returning from the GitHub integration screen or reopening
+  /// a project, so switching repos in Integrations is reflected immediately.
+  Future<GitHubRepo?> refreshLink() async {
+    final svc = projects;
+    if (svc == null || svc.projectName == null) return load();
+    final integration = await load();
+    if (integration != null) {
+      await svc.linkGitHubRepo(
+          integration.owner, integration.name,
+          branch: integration.defaultBranch);
+      return integration;
+    }
+    // No integration-level repo: drop a stale project link instead of
+    // letting git tools report a repository that is no longer connected.
+    final manifest = await svc.loadManifest();
+    if (manifest['gitRepository'] != null) {
+      await svc.updateManifest({'gitRepository': null, 'gitBranch': null});
+    }
+    return null;
+  }
 }
 
 // Keep keys centralized so the secure settings implementation stays private.

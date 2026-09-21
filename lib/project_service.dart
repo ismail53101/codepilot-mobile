@@ -103,6 +103,32 @@ class ProjectService {
     await updateManifest({'changedFiles': changed});
   }
 
+  /// Snapshot of every project file (path → content) excluding CodePilot's
+  /// own metadata files. This is the payload used for real GitHub tree
+  /// commits — one canonical copy shared by the agent tools and the publish
+  /// button so both publish exactly what the Explorer shows.
+  Map<String, String?> snapshotFiles() {
+    final files = <String, String?>{};
+    for (final node in fileTree()) {
+      if (node.isDir) continue;
+      if (node.path == '.codepilot_manifest.json' ||
+          node.path == '.codepilot_project') {
+        continue;
+      }
+      files[node.path] = readFile(node.path);
+    }
+    return files;
+  }
+
+  /// Record the linked GitHub repository in the project manifest so every
+  /// consumer (agent git tools, publish button, git_status) reads the SAME
+  /// canonical link. Called on GitHub import and automatically when a
+  /// connected repository is detected for the active project.
+  Future<void> linkGitHubRepo(String owner, String name,
+      {required String branch}) async {
+    await updateManifest({'gitRepository': '$owner/$name', 'gitBranch': branch});
+  }
+
   /// Compare working tree against the manifest's baseline hashes to produce
   /// a real git-status-like report (M = content differs, A = new, D = deleted).
   Future<List<GitFileChange>> changedFilesSinceBaseline() async {

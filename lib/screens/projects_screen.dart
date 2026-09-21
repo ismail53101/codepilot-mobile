@@ -40,6 +40,14 @@ class _ProjectsScreenState extends State<ProjectsScreen> {
     try {
       await projectService.openProject(name);
       if (!mounted) return;
+      // Reopening a project must re-derive its GitHub link from the
+      // canonical sources (integration repo / imported zipball layout) so
+      // the link matches the active project immediately.
+      try {
+        await githubProjectStore.resolveForActiveProject();
+      } catch (_) {
+        // Link sync is best-effort; Project Mode surfaces real errors.
+      }
       Navigator.pushNamed(context, '/explorer');
     } on ProjectException catch (e) {
       if (!mounted) return;

@@ -34,7 +34,11 @@ class ChatScreen extends StatefulWidget {
   State<ChatScreen> createState() => _ChatScreenState();
 }
 
-class _ChatScreenState extends State<ChatScreen> {
+class _ChatScreenState extends State<ChatScreen>
+    with RouteAware {
+  // RouteAware: returning from the GitHub/Integrations screens must refresh
+  // the repository link immediately — the user may have connected, switched
+  // or disconnected a repository there.
   final _input = TextEditingController();
   final _scroll = ScrollController();
   static const double _bottomThreshold = 130;
@@ -59,6 +63,10 @@ class _ChatScreenState extends State<ChatScreen> {
 
   // ---- autonomous agent state ----
   bool _agentMode = false; // Chat is the safe default; Project is explicit.
+
+  /// True while the GitHub publish (commit) request is in flight — the
+  /// toolbar button shows a spinner instead of silently doing nothing.
+  bool _publishing = false;
 
   /// Set by [_syncProjectContext] when entering Project Mode: true only when
   /// the active project's files were verified on disk. Never reset on
@@ -355,6 +363,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _thoughtSub?.cancel();
     _approvalSub?.cancel();
     _outcomeSub?.cancel();
+    routeObserver.unsubscribe(this);
     _input.dispose();
     _scroll.removeListener(_handleScroll);
     _scroll.dispose();
@@ -368,7 +377,20 @@ class _ChatScreenState extends State<ChatScreen> {
     // only after the user explicitly switches mode and opens/selects it.
     _agentMode = false;
     _scroll.addListener(_handleScroll);
-    WidgetsBinding.instance.addPostFrameCallback((_) => _initFromRoute());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      routeObserver.subscribe(this, ModalRoute.of(context)!);
+      _initFromRoute();
+    });
+  }
+
+  @override
+  void didPopNext() {
+    // Returning from Integrations → GitHub (or any other screen): re-derive
+    // the repository link from the canonical sources so connect/switch/
+    // disconnect take effect immediately without leaving Project Mode.
+    if (_agentMode && projectService.projectName != null) {
+      _syncProjectContext();
+    }
   }
 
   Future<void> _initFromRoute() async {
@@ -1260,43 +1282,72 @@ class _ChatScreenState extends State<ChatScreen> {
           isError: true);
       return;
     }
+    if (projectService.projectName == null) {
+      _push('system', 'Open a project first — there is nothing to publish.',
+          isError: true);
+      return;
+    }
+
+    // What has ACTUALLY changed on disk relative to the import baseline —
+    // this includes agent-applied edits and chat-confirmed changes alike.
+    List<GitFileChange> changes;
     try {
-      final message = await githubService.publishChanges(repo, agentService.history);
-      _push('system', message);
+      changes = await projectService.changedFilesSinceBaseline();
+    } catch (e) {
+      _push('system', 'Could not inspect project changes: $e', isError: true);
+      return;
+    }
+    if (changes.isEmpty) {
+      _push('system',
+          'No confirmed changes to publish — the project matches its last '
+          'imported/committed state. Ask the agent to modify a file first.');
+      return;
+    }
+
+    setState(() => _publishing = true);
+    _push('system',
+        'Publishing ${changes.length} changed file${changes.length == 1 ? '' : 's'} '
+        'to ${repo.fullName}…');
+    try {
+      // A REAL tree commit on GitHub with the full workspace snapshot.
+      final result = await githubService.commitTree(
+        repo: repo,
+        branch: repo.defaultBranch,
+        message: 'CodeFexa: publish ${changes.length} file'
+            '${changes.length == 1 ? '' : 's'} from mobile',
+        files: projectService.snapshotFiles(),
+      );
+      await projectService.updateManifest({
+        'lastCommitSha': result.sha,
+        'lastCommitUrl': result.htmlUrl,
+        'gitBranch': repo.defaultBranch,
+      });
+      await projectService.snapshotBaseline();
+      if (!mounted) return;
+      _push('system',
+          '✓ Published to ${repo.fullName} — commit '
+          '${result.sha.substring(0, 8)}\n${result.htmlUrl}');
     } on GitHubException catch (e) {
-      _push('system', e.message, isError: true);
+      if (!mounted) return;
+      // Honest failure: the commit did NOT happen.
+      _push('system', 'Publish FAILED — nothing was committed. ${e.message}',
+          isError: true);
+    } catch (e) {
+      if (!mounted) return;
+      _push('system', 'Publish FAILED — nothing was committed. $e',
+          isError: true);
+    } finally {
+      if (mounted) setState(() => _publishing = false);
     }
   }
 
-  /// CANONICAL repository resolution — the same source of truth the Project
-  /// Explorer uses. Order:
-  /// 1. Persisted repo metadata (saved at GitHub import time).
-  /// 2. Recovered identity from the open project's imported zipball layout
-  ///    (single root folder `<owner>-<repo>-<sha>`); verified against the
-  ///    GitHub API and, when it matches, persisted so later runs are instant.
-  /// 3. A project with NO zipball wrapper (ZIP import / created project) is
-  ///    still a real local project — but it is not a GitHub repository, so
-  ///    this returns null and publishing explains what is missing, once.
-  Future<GitHubRepo?> _resolveConnectedRepo() async {
-    var repo = await githubProjectStore.load();
-    if (repo != null) return repo;
-
-    // Fall back to the open project's real, file-based context.
-    if (projectService.projectName == null) return null;
-    final recovered = githubRepoFromZipballLayout(projectService.rootEntryNames);
-    if (recovered == null) return null;
-
-    // Verify against GitHub (default branch + existence). If the token is
-    // missing or the API is unreachable, publish will fail with its own
-    // specific error — do not fabricate connection state here.
-    try {
-      repo = await githubService.fetchRepoDetails(recovered);
-    } on GitHubException {
-      repo = recovered; // offline: try with the parsed name/branch anyway
-    }
-    await githubProjectStore.save(repo); // self-heal for subsequent runs
-    return repo;
-  }
+  /// CANONICAL repository resolution — delegated to
+  /// [GitHubProjectStore.resolveForActiveProject]: the project's own manifest
+  /// link, then the integration-level repository (synced INTO the project),
+  /// then recovery from the imported zipball layout. Null only when every
+  /// source confirms no repository context.
+  Future<GitHubRepo?> _resolveConnectedRepo() =>
+      githubProjectStore.resolveForActiveProject();
 
   /// Project Mode initialization flow, run when entering Project Mode (and
   /// once at screen init): active project → repository metadata → file
@@ -1313,18 +1364,15 @@ class _ChatScreenState extends State<ChatScreen> {
     } catch (_) {
       filesOk = false; // no project open, or the folder vanished/is unreadable
     }
-    // Load repo metadata and self-heal from the project layout when absent —
-    // same recovery the publish action uses, so Explorer and Project Mode
-    // never disagree about the same repository.
-    if (await githubProjectStore.load() == null) {
-      final recovered = githubRepoFromZipballLayout(projectService.rootEntryNames);
-      if (recovered != null) {
-        try {
-          await githubProjectStore.save(await githubService.fetchRepoDetails(recovered));
-        } on GitHubException {
-          await githubProjectStore.save(recovered);
-        }
-      }
+    // Canonical repository resolution + link refresh: writes the project
+    // manifest link, self-heals from the imported zipball layout when
+    // metadata is absent, and syncs integration ↔ project state so the
+    // agent's git tools, git_status and the publish button all agree.
+    try {
+      await githubProjectStore.resolveForActiveProject();
+    } catch (_) {
+      // Network/token problems must not block Project Mode itself; the
+      // publish action surfaces its own specific error later.
     }
     if (mounted) setState(() => _projectContextReady = filesOk);
   }
@@ -1341,7 +1389,23 @@ class _ChatScreenState extends State<ChatScreen> {
             tooltip: 'Download project as ZIP',
             onPressed: _downloadZip,
           ),
-        IconButton(icon: const Icon(Icons.cloud_upload), tooltip: 'Publish confirmed changes to GitHub', onPressed: _publishToGitHub),
+        if (_publishing)
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 12),
+            child: SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+          )
+        else
+          IconButton(
+            icon: const Icon(Icons.cloud_upload),
+            tooltip: _agentMode && projectService.projectName != null
+                ? 'Publish project changes to GitHub'
+                : 'Publish to GitHub (open a project first)',
+            onPressed: _publishToGitHub,
+          ),
         IconButton(icon: const Icon(Icons.undo), tooltip: 'Undo latest change', onPressed: () {
           final rec = agentService.undoLast();
           _push('system', rec == null ? 'Nothing to undo.' : 'Undone: ${rec.kind} ${rec.path}');

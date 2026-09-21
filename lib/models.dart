@@ -336,7 +336,14 @@ class AgentActionSummary {
           addUnique(commands, s.args['command'] as String?);
           break;
         case 'git_commit':
-          addUnique(commits, s.args['message'] as String?);
+        case 'git_push':
+          // Count a commit ONLY if the tool actually succeeded. A failed
+          // commit (no linked repository, API error, denied) must never be
+          // reported as committed — the summary stays honest.
+          if (s.status != AgentStepStatus.failed &&
+              (s.detail ?? '').startsWith('OK:')) {
+            addUnique(commits, s.args['message'] as String?);
+          }
           break;
         case 'read_file':
         case 'list_files':

@@ -46,11 +46,17 @@ final providerStore = ProviderStore();
 final aiRouter = ProviderRouter(store: providerStore, legacy: settingsStore);
 final agentService = AgentService(projectService);
 final githubService = GitHubService(settingsStore);
-final githubProjectStore = GitHubProjectStore(settingsStore);
+final githubProjectStore =
+    GitHubProjectStore(settingsStore, projects: projectService);
 final searchHistoryStore = SearchHistoryStore();
 final chatSessionStore = ChatSessionStore();
 final integrationManager = IntegrationManager();
 final emailOtpService = EmailOtpService();
+
+/// Lets screens react to navigation (e.g. ChatScreen refreshes its GitHub
+/// repository link when the user returns from Integrations → GitHub).
+final RouteObserver<ModalRoute<void>> routeObserver =
+    RouteObserver<ModalRoute<void>>();
 
 class CodePilotApp extends StatelessWidget {
   const CodePilotApp({super.key});
@@ -62,11 +68,12 @@ class CodePilotApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       theme: AppTheme.dark(),
       initialRoute: '/',
+      navigatorObservers: [routeObserver],
       routes: {
         '/': (_) => const HomeScreen(),
         '/import': (_) => const ImportScreen(),
         '/explorer': (_) => const ExplorerScreen(),
-        '/chat': (_) => const ChatScreen(),
+        '/chat': (_) => const ChatScreen(), // refreshes its repo link on return via routeObserver
         '/search': (_) => const SearchResultsScreen(),
         '/preview': (_) => const FilePreviewScreen(),
         '/live-preview': (_) => const LivePreviewRoute(),

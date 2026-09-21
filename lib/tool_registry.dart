@@ -430,12 +430,12 @@ class ToolRegistry {
         execute: (args, {cancelToken}) async {
           if (!_hasProject) return _noProject();
           final changes = await projects.changedFilesSinceBaseline();
-          final manifest = await projects.loadManifest();
+          final repo = await _linkedRepo();
           final git = projects.gitInfo();
           final buf = StringBuffer();
           buf.writeln('project: ${projects.projectName} (${projects.detectType()})');
-          buf.writeln('remote: ${manifest['gitRepository'] ?? '(not linked)'}');
-          buf.writeln('branch: ${manifest['gitBranch'] ?? git?.branch ?? '(unknown)'}');
+          buf.writeln('remote: ${repo?.fullName ?? '(not linked)'}');
+          buf.writeln('branch: ${repo?.defaultBranch ?? git?.branch ?? '(unknown)'}');
           if (changes.isEmpty) {
             buf.write('working tree: clean (no changes since baseline)');
           } else {
@@ -449,17 +449,26 @@ class ToolRegistry {
       );
 
   /// Collect the full workspace snapshot for a real tree commit.
-  Map<String, String?> _snapshotFiles() {
-    final files = <String, String?>{};
-    for (final node in projects.fileTree()) {
-      if (node.isDir) continue;
-      if (node.path == '.codepilot_manifest.json' ||
-          node.path == '.codepilot_project') {
-        continue;
-      }
-      files[node.path] = projects.readFile(node.path);
+  ///
+  /// Delegates to the canonical [ProjectService.snapshotFiles] — the same
+  /// payload the publish button sends, so agent commits and manual publishes
+  /// always upload exactly what the Explorer shows.
+  Map<String, String?> _snapshotFiles() => projects.snapshotFiles();
+
+  /// The linked GitHub repository for the ACTIVE PROJECT — canonical
+  /// resolution via [GitHubProjectStore.resolveForActiveProject].
+  ///
+  /// When a repository is resolved, its identity is written into the
+  /// project manifest so later manifest reads (and git_status) agree. This
+  /// is the fix for "no GitHub repository is linked to this project": the
+  /// link no longer depends on a manifest field that nothing used to write.
+  Future<GitHubRepo?> _linkedRepo() async {
+    final repo = await repoStore.resolveForActiveProject();
+    if (repo != null) {
+      await projects.linkGitHubRepo(repo.owner, repo.name,
+          branch: repo.defaultBranch);
     }
-    return files;
+    return repo;
   }
 
   AgentTool _gitCommit() => AgentTool(
@@ -482,20 +491,12 @@ class ToolRegistry {
         },
         execute: (args, {cancelToken}) async {
           if (!_hasProject) return _noProject();
-          final manifest = await projects.loadManifest();
-          final repoFull = manifest['gitRepository'] as String?;
-          if (repoFull == null) {
+          final repo = await _linkedRepo();
+          if (repo == null) {
             return 'ERROR: no GitHub repository is linked to this project. '
-                'Import it via Integrations → GitHub first.';
+                'Connect one via Integrations → GitHub (or import the repo '
+                'there) and retry.';
           }
-          final parts = repoFull.split('/');
-          if (parts.length != 2) return 'ERROR: malformed repository "$repoFull".';
-          final repo = GitHubRepo(
-            owner: parts[0],
-            name: parts[1],
-            defaultBranch: (manifest['gitBranch'] as String?) ?? 'main',
-            privateRepo: false,
-          );
           final branch = args['branch'] as String? ?? repo.defaultBranch;
           final gate = approvalGate;
           if (gate != null) {
@@ -532,16 +533,8 @@ class ToolRegistry {
           'required': ['name'],
         },
         execute: (args, {cancelToken}) async {
-          final manifest = await projects.loadManifest();
-          final repoFull = manifest['gitRepository'] as String?;
-          if (repoFull == null) return _noProjectLinked();
-          final parts = repoFull.split('/');
-          final repo = GitHubRepo(
-            owner: parts[0],
-            name: parts[1],
-            defaultBranch: (manifest['gitBranch'] as String?) ?? 'main',
-            privateRepo: false,
-          );
+          final repo = await _linkedRepo();
+          if (repo == null) return _noProjectLinked();
           final name = args['name'] as String? ?? '';
           final sha = await github.createBranch(repo, name);
           await projects.updateManifest({'gitBranch': name});
@@ -587,16 +580,8 @@ class ToolRegistry {
           'required': ['head', 'base', 'title'],
         },
         execute: (args, {cancelToken}) async {
-          final manifest = await projects.loadManifest();
-          final repoFull = manifest['gitRepository'] as String?;
-          if (repoFull == null) return _noProjectLinked();
-          final parts = repoFull.split('/');
-          final repo = GitHubRepo(
-            owner: parts[0],
-            name: parts[1],
-            defaultBranch: (manifest['gitBranch'] as String?) ?? 'main',
-            privateRepo: false,
-          );
+          final repo = await _linkedRepo();
+          if (repo == null) return _noProjectLinked();
           final pr = await github.createPullRequest(
             repo,
             args['head'] as String,
@@ -628,15 +613,8 @@ class ToolRegistry {
           },
         },
         execute: (args, {cancelToken}) async {
-          final manifest = await projects.loadManifest();
-          final repoFull = manifest['gitRepository'] as String?;
-          if (repoFull == null) return _noProjectLinked();
-          final parts = repoFull.split('/');
-          final repo = GitHubRepo(
-            owner: parts[0],
-            name: parts[1],
-            defaultBranch: (manifest['gitBranch'] as String?) ?? 'main',
-            privateRepo: false,
+          final repo = await _linkedRepo();
+          if (repo == null) return _noProjectLinked();
           );
           final branch = args['branch'] as String? ?? repo.defaultBranch;
           final wait = args['wait'] as bool? ?? true;

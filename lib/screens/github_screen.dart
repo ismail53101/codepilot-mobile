@@ -34,6 +34,22 @@ class _GitHubScreenState extends State<GitHubScreen> {
 
   Future<void> _loadSelected() async {
     final repo = await githubProjectStore.load();
+    if (!mounted) return;
+    // Keep the ACTIVE project's link in lockstep with the integration:
+    // connecting/switching repos here refreshes the open project's remote;
+    // disconnecting clears the project link so stale commits can't target
+    // a repository the user unlinked.
+    try {
+      if (repo != null && projectService.projectName != null) {
+        await projectService.linkGitHubRepo(repo.owner, repo.name,
+            branch: repo.defaultBranch);
+      } else if (repo == null && projectService.projectName != null) {
+        await projectService
+            .updateManifest({'gitRepository': null, 'gitBranch': null});
+      }
+    } catch (_) {
+      // Never block the integrations UI on manifest sync issues.
+    }
     final email = await settingsStore.readEmailIdentity();
     var login = (await settingsStore.loadGitHubIdentity())['login'];
     // Token present but identity missing (e.g. old install): re-verify once.
@@ -206,6 +222,11 @@ class _GitHubScreenState extends State<GitHubScreen> {
     try {
       await githubService.importRepo(repo, projectService);
       await githubProjectStore.save(repo);
+      // Link the newly imported project in its own manifest immediately so
+      // the agent's git tools and the publish button see it without
+      // waiting for the next Project Mode sync.
+      await projectService.linkGitHubRepo(repo.owner, repo.name,
+          branch: repo.defaultBranch);
       if (mounted) setState(() => _message = 'Imported ${repo.fullName}. Open AI Chat to work on it.');
     } on GitHubException catch (e) {
       if (mounted) setState(() => _message = e.message);
