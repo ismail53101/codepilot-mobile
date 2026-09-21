@@ -4,8 +4,7 @@ import '../main.dart';
 import '../stores.dart';
 import '../theme.dart';
 
-/// Search History screen: recent searches recorded from the Home command
-/// bar. Tap to run a search again, swipe to remove, or clear everything.
+/// Persistent session history with separate Chat and Project views.
 class SearchHistoryScreen extends StatefulWidget {
   const SearchHistoryScreen({super.key});
 
@@ -14,8 +13,19 @@ class SearchHistoryScreen extends StatefulWidget {
 }
 
 class _SearchHistoryScreenState extends State<SearchHistoryScreen> {
-  List<SearchHistoryEntry> _entries = [];
+  bool _projectHistory = false;
   bool _loading = true;
+  String _query = '';
+  List<ChatSession> _chatHistory = [];
+  List<ChatSession> _projectHistoryItems = [];
+
+  List<ChatSession> get _selectedHistory => _projectHistory ? _projectHistoryItems : _chatHistory;
+
+  List<ChatSession> get _visibleHistory {
+    final q = _query.trim().toLowerCase();
+    if (q.isEmpty) return _selectedHistory;
+    return _selectedHistory.where((s) => s.title.toLowerCase().contains(q) || s.messages.any((m) => m.content.toLowerCase().contains(q))).toList();
+  }
 
   @override
   void initState() {
@@ -24,117 +34,128 @@ class _SearchHistoryScreenState extends State<SearchHistoryScreen> {
   }
 
   Future<void> _refresh() async {
-    final entries = await searchHistoryStore.load();
+    final sessions = await chatSessionStore.load();
     if (!mounted) return;
     setState(() {
-      _entries = entries;
+      _chatHistory = sessions.where((s) => !s.isProject).toList();
+      _projectHistoryItems = sessions.where((s) => s.isProject).toList();
       _loading = false;
     });
   }
 
-  Future<void> _rerun(SearchHistoryEntry entry) async {
-    await searchHistoryStore.add(entry.query); // bump to top
-    if (!mounted) return;
-    final noProject = projectService.projectName == null;
-    Navigator.pushNamed(context, noProject ? '/chat' : '/search',
-        arguments: entry.query);
+  Future<void> _clearSelected() async {
+    final label = _projectHistory ? 'project history' : 'chat history';
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppTheme.surface,
+        title: Text('Clear $label?'),
+        content: Text('This will not delete ${_projectHistory ? 'chat' : 'project'} history.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Clear')),
+        ],
+      ),
+    );
+    if (confirmed == true) {
+      await chatSessionStore.clearMode(_projectHistory);
+      await _refresh();
+    }
   }
 
-  Future<void> _remove(int index) async {
-    await searchHistoryStore.removeAt(index);
+  Future<void> _delete(ChatSession session) async {
+    await chatSessionStore.remove(session.id);
     await _refresh();
   }
 
-  Future<void> _clearAll() async {
-    await searchHistoryStore.clear();
-    await _refresh();
+  void _open(ChatSession session) {
+    Navigator.pushNamed(context, '/chat', arguments: {'sessionId': session.id});
+  }
+
+  String _dateLabel(DateTime time) {
+    final local = time.toLocal();
+    final mm = local.month.toString().padLeft(2, '0');
+    final dd = local.day.toString().padLeft(2, '0');
+    final hh = local.hour.toString().padLeft(2, '0');
+    final mi = local.minute.toString().padLeft(2, '0');
+    return '$mm/$dd/${local.year} · $hh:$mi';
   }
 
   @override
   Widget build(BuildContext context) {
+    final visible = _visibleHistory;
+    final title = _projectHistory ? 'Project History' : 'Chat History';
     return Scaffold(
       backgroundColor: AppTheme.navyBg,
       appBar: AppBar(
         backgroundColor: AppTheme.navyBg,
         title: const Text('Search History'),
         actions: [
-          if (_entries.isNotEmpty)
-            IconButton(
-              icon: const Icon(Icons.delete_sweep_outlined),
-              tooltip: 'Clear history',
-              onPressed: _clearAll,
-            ),
+          if (!_loading && _selectedHistory.isNotEmpty)
+            IconButton(icon: const Icon(Icons.delete_sweep_outlined), tooltip: 'Clear $title', onPressed: _clearSelected),
         ],
       ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
-          : _entries.isEmpty
-              ? ListView(children: const [
-                  Padding(
-                    padding: EdgeInsets.all(32),
-                    child: Column(children: [
-                      Icon(Icons.history, size: 56, color: AppTheme.muted),
-                      SizedBox(height: 12),
-                      Text('No recent searches',
-                          style: TextStyle(
-                              color: AppTheme.text,
-                              fontSize: 16,
-                              fontWeight: FontWeight.w600)),
-                      SizedBox(height: 6),
-                      Text(
-                          'Searches you run from the Home command bar will appear here.',
-                          textAlign: TextAlign.center,
-                          style: TextStyle(color: AppTheme.muted)),
-                    ]),
-                  ),
-                ])
-              : ListView.separated(
-                  padding: const EdgeInsets.all(16),
-                  itemCount: _entries.length,
-                  separatorBuilder: (_, __) => const SizedBox(height: 8),
-                  itemBuilder: (context, index) {
-                    final entry = _entries[index];
-                    return Dismissible(
-                      key: ValueKey('${entry.query}:${entry.time.millisecondsSinceEpoch}'),
-                      direction: DismissDirection.endToStart,
-                      onDismissed: (_) => _remove(index),
-                      background: Container(
-                        alignment: Alignment.centerRight,
-                        padding: const EdgeInsets.only(right: 20),
-                        decoration: BoxDecoration(
-                          color: AppTheme.err.withOpacity(.15),
-                          borderRadius: BorderRadius.circular(14),
-                        ),
-                        child:
-                            const Icon(Icons.delete_outline, color: AppTheme.err),
-                      ),
-                      child: Container(
-                        decoration: BoxDecoration(
-                          color: AppTheme.surface,
-                          borderRadius: BorderRadius.circular(14),
-                          border: Border.all(color: AppTheme.border),
-                        ),
-                        child: ListTile(
-                          shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(14)),
-                          leading: const Icon(Icons.history,
-                              color: AppTheme.glowAccent),
-                          title: Text(entry.query,
-                              style: const TextStyle(
-                                  color: AppTheme.text, fontSize: 14),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis),
-                          subtitle: Text(entry.timeLabel,
-                              style: const TextStyle(
-                                  color: AppTheme.muted, fontSize: 11)),
-                          trailing: const Icon(Icons.chevron_right,
-                              color: AppTheme.muted),
-                          onTap: () => _rerun(entry),
-                        ),
-                      ),
-                    );
-                  },
+          : Column(children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(14, 10, 14, 4),
+                child: SegmentedButton<bool>(
+                  segments: const [
+                    ButtonSegment(value: false, icon: Icon(Icons.chat_bubble_outline, size: 16), label: Text('Chat History')),
+                    ButtonSegment(value: true, icon: Icon(Icons.code, size: 16), label: Text('Project History')),
+                  ],
+                  selected: {_projectHistory},
+                  onSelectionChanged: (selection) => setState(() { _projectHistory = selection.first; _query = ''; }),
+                  showSelectedIcon: false,
                 ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+                child: Align(alignment: Alignment.centerLeft, child: Text(title, style: TextStyle(color: _projectHistory ? AppTheme.glowAccent : AppTheme.accent, fontSize: 17, fontWeight: FontWeight.w700))),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(14, 4, 14, 10),
+                child: TextField(
+                  onChanged: (value) => setState(() => _query = value),
+                  decoration: InputDecoration(prefixIcon: const Icon(Icons.search), hintText: _projectHistory ? 'Search projects...' : 'Search chats...', isDense: true),
+                ),
+              ),
+              Expanded(
+                child: visible.isEmpty
+                    ? Center(child: Text(_projectHistory ? 'No project history yet' : 'No chat history yet', style: const TextStyle(color: AppTheme.muted)))
+                    : ListView.separated(
+                        padding: const EdgeInsets.fromLTRB(14, 2, 14, 20),
+                        itemCount: visible.length,
+                        separatorBuilder: (_, __) => const SizedBox(height: 8),
+                        itemBuilder: (context, index) {
+                          final session = visible[index];
+                          return Dismissible(
+                            key: ValueKey(session.id),
+                            direction: DismissDirection.endToStart,
+                            onDismissed: (_) => _delete(session),
+                            background: Container(
+                              alignment: Alignment.centerRight,
+                              padding: const EdgeInsets.only(right: 20),
+                              decoration: BoxDecoration(color: AppTheme.err.withOpacity(.15), borderRadius: BorderRadius.circular(14)),
+                              child: const Icon(Icons.delete_outline, color: AppTheme.err),
+                            ),
+                            child: Container(
+                              decoration: BoxDecoration(color: AppTheme.surface, borderRadius: BorderRadius.circular(14), border: Border.all(color: AppTheme.border)),
+                              child: ListTile(
+                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                                leading: Icon(_projectHistory ? Icons.code : Icons.chat_bubble_outline, color: _projectHistory ? AppTheme.glowAccent : AppTheme.accent),
+                                title: Text(session.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: AppTheme.text, fontSize: 14, fontWeight: FontWeight.w600)),
+                                subtitle: Text(_dateLabel(session.time), style: const TextStyle(color: AppTheme.muted, fontSize: 11)),
+                                trailing: const Icon(Icons.chevron_right, color: AppTheme.muted),
+                                onTap: () => _open(session),
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+              ),
+            ]),
     );
   }
 }

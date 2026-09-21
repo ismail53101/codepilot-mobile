@@ -37,6 +37,8 @@ class ChatScreen extends StatefulWidget {
 class _ChatScreenState extends State<ChatScreen> {
   final _input = TextEditingController();
   final _scroll = ScrollController();
+  bool _manualScrollActive = false;
+  bool _userNearBottom = true;
   final List<ChatMessage> _messages = [];
   List<ProposedChange> _pending = [];
   bool _busy = false;
@@ -1032,8 +1034,14 @@ class _ChatScreenState extends State<ChatScreen> {
       };
 
   void _scrollDown() {
+    // Do not interrupt manual scrolling or an older-message view. Image
+    // decoding and streaming updates are ordinary list updates, not scroll
+    // targets; only follow new content when already near the bottom.
+    if (_manualScrollActive || !_userNearBottom) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scroll.hasClients) _scroll.animateTo(_scroll.position.maxScrollExtent, duration: const Duration(milliseconds: 250), curve: Curves.easeOut);
+      if (_manualScrollActive || !_userNearBottom || !_scroll.hasClients) return;
+      _scroll.animateTo(_scroll.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 250), curve: Curves.easeOut);
     });
   }
 
@@ -1132,10 +1140,21 @@ class _ChatScreenState extends State<ChatScreen> {
           ]),
         ),
         Expanded(
-          child: ListView(
-            controller: _scroll,
-            padding: const EdgeInsets.all(12),
-            children: [
+          child: NotificationListener<ScrollNotification>(
+            onNotification: (notification) {
+              if (notification is UserScrollNotification) {
+                _manualScrollActive = true;
+                _userNearBottom = notification.metrics.extentAfter <= 120;
+              } else if (notification is ScrollEndNotification) {
+                _manualScrollActive = false;
+                _userNearBottom = notification.metrics.extentAfter <= 120;
+              }
+              return false;
+            },
+            child: ListView(
+              controller: _scroll,
+              padding: const EdgeInsets.all(12),
+              children: [
               if (_messages.isEmpty)
                 Text(!_agentMode
                     ? 'Chat Mode is ready. Ask anything, study a topic, or attach a file to discuss it.\n\nProject files are not used unless you switch to Project Mode.'
@@ -1173,7 +1192,8 @@ class _ChatScreenState extends State<ChatScreen> {
                   _agentState == AgentTaskState.idle)
                 const Padding(padding: EdgeInsets.all(8), child: Center(child: CircularProgressIndicator())),
               for (var i = 0; i < _pending.length; i++) _pendingCard(i),
-            ],
+              ],
+            ),
           ),
         ),
         SafeArea(

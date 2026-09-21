@@ -24,6 +24,7 @@ class _HomeScreenState extends State<HomeScreen> {
   final _command = TextEditingController();
   final _searchFocus = FocusNode();
   ComposerMode _mode = ComposerMode.ask;
+  bool _projectMode = false;
   PlatformFile? _attachment;
   String? _attachmentContent;
 
@@ -192,8 +193,16 @@ class _HomeScreenState extends State<HomeScreen> {
                   Navigator.pushNamed(context, '/new-project'),
               onOpenApiKeys: () => Navigator.pushNamed(context, '/keys'),
             ),
-            // Large intentionally empty workspace.
-            const Expanded(child: SizedBox.shrink()),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 8, 14, 0),
+              child: _ModeSwitcher(
+                projectMode: _projectMode,
+                onChanged: (project) => setState(() => _projectMode = project),
+              ),
+            ),
+            Expanded(
+              child: _projectMode ? _ProjectWorkspace(onOpen: () => Navigator.pushNamed(context, '/projects')) : const SizedBox.shrink(),
+            ),
             CodeSearchBar(
               controller: _command,
               focusNode: _searchFocus,
@@ -223,6 +232,92 @@ class _HomeScreenState extends State<HomeScreen> {
     _command.dispose();
     _searchFocus.dispose();
     super.dispose();
+  }
+}
+
+class _ModeSwitcher extends StatelessWidget {
+  final bool projectMode;
+  final ValueChanged<bool> onChanged;
+
+  const _ModeSwitcher({required this.projectMode, required this.onChanged});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: 42,
+      padding: const EdgeInsets.all(3),
+      decoration: BoxDecoration(
+        color: AppTheme.navyPanel.withOpacity(.88),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: AppTheme.border),
+      ),
+      child: Row(children: [
+        Expanded(child: _ModeButton(
+          icon: Icons.chat_bubble_outline,
+          label: 'Chat',
+          selected: !projectMode,
+          onTap: () => onChanged(false),
+        )),
+        const SizedBox(width: 3),
+        Expanded(child: _ModeButton(
+          icon: Icons.code,
+          label: 'Project',
+          selected: projectMode,
+          onTap: () => onChanged(true),
+        )),
+      ]),
+    );
+  }
+}
+
+class _ModeButton extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _ModeButton({required this.icon, required this.label, required this.selected, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: selected ? AppTheme.glowSoft : Colors.transparent,
+      borderRadius: BorderRadius.circular(11),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(11),
+        onTap: onTap,
+        child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+          Icon(icon, size: 16, color: selected ? AppTheme.glowAccent : AppTheme.muted),
+          const SizedBox(width: 6),
+          Text(label, style: TextStyle(color: selected ? AppTheme.text : AppTheme.muted, fontSize: 12, fontWeight: selected ? FontWeight.w600 : FontWeight.w400)),
+        ]),
+      ),
+    );
+  }
+}
+
+class _ProjectWorkspace extends StatelessWidget {
+  final VoidCallback onOpen;
+
+  const _ProjectWorkspace({required this.onOpen});
+
+  @override
+  Widget build(BuildContext context) {
+    final name = projectService.projectName;
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Icon(Icons.folder_copy_outlined, size: 48, color: AppTheme.glowAccent.withOpacity(.8)),
+          const SizedBox(height: 12),
+          Text(name == null ? 'Project Mode' : name, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w600)),
+          const SizedBox(height: 6),
+          Text(name == null ? 'Open or create a project to work with project files.' : 'Project workspace is ready. Use Chat Mode for normal conversation.', textAlign: TextAlign.center, style: const TextStyle(color: AppTheme.muted, fontSize: 13)),
+          const SizedBox(height: 16),
+          FilledButton.icon(onPressed: onOpen, icon: const Icon(Icons.folder_open), label: Text(name == null ? 'Open Projects' : 'Manage Project')),
+        ]),
+      ),
+    );
   }
 }
 

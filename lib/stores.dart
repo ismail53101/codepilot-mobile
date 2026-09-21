@@ -346,4 +346,20 @@ class ChatSessionStore {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_kSessions);
   }
+
+  Future<void> clearMode(bool isProject) async {
+    final sessions = (await load()).where((s) => s.isProject != isProject).toList();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_kSessions, jsonEncode([
+      for (final s in sessions)
+        {
+          'id': s.id,
+          'title': s.title,
+          'time': s.time.toIso8601String(),
+          'isProject': s.isProject,
+          'messages': [for (final m in s.messages) m.toJson()],
+          if (s.activity != null) 'activity': s.activity,
+        },
+    ]));
+  }
 }
