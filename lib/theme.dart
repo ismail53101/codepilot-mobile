@@ -52,7 +52,10 @@ class AppTheme {
         elevation: 0,
         centerTitle: false,
       ),
-      cardTheme: CardTheme(
+      // Copy the platform's card-theme type so this remains compatible with
+      // Flutter versions that use CardTheme and newer versions that use
+      // CardThemeData for ThemeData.cardTheme.
+      cardTheme: base.cardTheme.copyWith(
         color: surface,
         elevation: 0,
         shape: RoundedRectangleBorder(
