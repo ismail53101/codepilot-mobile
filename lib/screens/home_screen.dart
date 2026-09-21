@@ -310,7 +310,7 @@ class _ProjectWorkspace extends StatelessWidget {
         child: Column(mainAxisSize: MainAxisSize.min, children: [
           Icon(Icons.folder_copy_outlined, size: 48, color: AppTheme.glowAccent.withOpacity(.8)),
           const SizedBox(height: 12),
-          Text(name == null ? 'Project Mode' : name, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w600)),
+          Text(name ?? 'Project Mode', style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w600)),
           const SizedBox(height: 6),
           Text(name == null ? 'Open or create a project to work with project files.' : 'Project workspace is ready. Use Chat Mode for normal conversation.', textAlign: TextAlign.center, style: const TextStyle(color: AppTheme.muted, fontSize: 13)),
           const SizedBox(height: 16),
