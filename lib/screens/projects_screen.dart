@@ -48,6 +48,7 @@ class _ProjectsScreenState extends State<ProjectsScreen> {
       } catch (_) {
         // Link sync is best-effort; Project Mode surfaces real errors.
       }
+      if (!mounted) return;
       Navigator.pushNamed(context, '/explorer');
     } on ProjectException catch (e) {
       if (!mounted) return;
