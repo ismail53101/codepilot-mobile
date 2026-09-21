@@ -89,7 +89,7 @@ void main() {
     };
     final router = await routerWith(backends);
 
-    final result = await router.chatWithTools(const [
+    final result = await router.chatWithTools([
       ChatMessage(role: 'user', content: 'hi'),
     ]);
     expect(result.content, 'ok-from-b');
@@ -107,7 +107,7 @@ void main() {
 
     final candidates = await router.resolveCandidates();
     expect(candidates.map((c) => c.$1.id), ['good']);
-    expect((await router.chatWithTools(const [
+    expect((await router.chatWithTools([
       ChatMessage(role: 'user', content: 'hi'),
     ]))
         .content, 'ok-from-good');
@@ -128,7 +128,7 @@ void main() {
     final router = await routerWith(backends);
 
     await expectLater(
-      router.chatWithTools(const [ChatMessage(role: 'user', content: 'hi')]),
+      router.chatWithTools([ChatMessage(role: 'user', content: 'hi')]),
       throwsA(isA<ApiException>()
           .having((e) => e.kind, 'kind', 'invalid_api_key')),
     );
@@ -148,7 +148,7 @@ void main() {
     final router = await routerWith(backends);
 
     await expectLater(
-      router.chatWithTools(const [ChatMessage(role: 'user', content: 'hi')]),
+      router.chatWithTools([ChatMessage(role: 'user', content: 'hi')]),
       throwsA(isA<ApiException>()
           .having((e) => e.kind, 'kind', 'cancelled')),
     );
@@ -169,7 +169,7 @@ void main() {
     final router = await routerWith(backends);
 
     try {
-      await router.chatWithTools(const [ChatMessage(role: 'user', content: 'x')]);
+      await router.chatWithTools([ChatMessage(role: 'user', content: 'x')]);
       fail('should have thrown');
     } on ApiException catch (e) {
       expect(e.message, contains('OpenRouter K1'));
@@ -200,7 +200,7 @@ void main() {
 
     try {
       await router.chatWithTools(
-          const [ChatMessage(role: 'user', content: 'x')]);
+          [ChatMessage(role: 'user', content: 'x')]);
       fail('should have thrown');
     } on ApiException {
       // Only the first 3 candidates may ever be attempted.
@@ -234,7 +234,7 @@ void main() {
       () async {
     final router = await routerWith({});
     await expectLater(
-      router.chatWithTools(const [ChatMessage(role: 'user', content: 'x')]),
+      router.chatWithTools([ChatMessage(role: 'user', content: 'x')]),
       throwsA(isA<ApiException>()
           .having((e) => e.kind, 'kind', 'no_api_key')
           .having((e) => e.message, 'message', contains('API Key'))),
