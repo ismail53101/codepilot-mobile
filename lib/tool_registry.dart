@@ -615,7 +615,6 @@ class ToolRegistry {
         execute: (args, {cancelToken}) async {
           final repo = await _linkedRepo();
           if (repo == null) return _noProjectLinked();
-          );
           final branch = args['branch'] as String? ?? repo.defaultBranch;
           final wait = args['wait'] as bool? ?? true;
 
