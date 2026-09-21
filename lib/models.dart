@@ -150,6 +150,29 @@ class ChatMessage {
       );
 }
 
+/// Collapse runs of identical consecutive persisted system-error cards.
+///
+/// Older builds appended one error card per failed action/poll, so restored
+/// transcripts could contain 5–10 identical "Connect and import…" cards for
+/// a single error condition. This keeps the FIRST card of each identical
+/// consecutive run and drops the repeats — errors are shown once, honestly.
+List<ChatMessage> collapseDuplicateSystemErrors(List<ChatMessage> messages) {
+  final out = <ChatMessage>[];
+  for (final m in messages) {
+    final last = out.isEmpty ? null : out.last;
+    if (m.isError &&
+        m.role == 'system' &&
+        last != null &&
+        last.role == 'system' &&
+        last.isError &&
+        last.content == m.content) {
+      continue;
+    }
+    out.add(m);
+  }
+  return out;
+}
+
 /// A recorded change (applied or undone) for the change history.
 class ChangeRecord {
   final String id;

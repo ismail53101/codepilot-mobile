@@ -59,6 +59,11 @@ class _ChatScreenState extends State<ChatScreen> {
 
   // ---- autonomous agent state ----
   bool _agentMode = false; // Chat is the safe default; Project is explicit.
+
+  /// Set by [_syncProjectContext] when entering Project Mode: true only when
+  /// the active project's files were verified on disk. Never reset on
+  /// remount — the source of truth is the project folder itself.
+  bool _projectContextReady = false;
   AgentMode _approvalMode = AgentMode.auto;
   AgentLoop? _activeLoop;
 
@@ -248,10 +253,15 @@ class _ChatScreenState extends State<ChatScreen> {
       _lastAgentRequest = null;
       _resumeContext = null;
       if (chosen != null) {
-        _messages.addAll(chosen.messages);
+        _messages.addAll(collapseDuplicateSystemErrors(chosen.messages));
         _restoreActivity(chosen.activity);
       }
     });
+    // Project Mode was entered (or a project session restored): sync the
+    // repository context from the same source of truth as the Explorer.
+    if (project && projectService.projectName != null) {
+      await _syncProjectContext();
+    }
     _scrollToBottom(force: true);
   }
 
@@ -306,6 +316,10 @@ class _ChatScreenState extends State<ChatScreen> {
       await projectService.openProject(chosen);
       if (!mounted) return;
       await _switchConversation(project: true);
+      // Initialization flow: active project → repository metadata →
+      // verify imported files → ready. Keeps Project Mode, the Explorer
+      // and the publish gate on one canonical state.
+      await _syncProjectContext();
     } on ProjectException catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
     }
@@ -394,25 +408,28 @@ class _ChatScreenState extends State<ChatScreen> {
       if (chosen != null) {
         final selected = chosen;
         if (selected.isProject && selected.projectId != null) {
-          try {
-            await projectService.openProject(selected.projectId!);
-          } catch (_) {
-            // Keep the transcript available even if its project is no longer
-            // present; Project Mode will show the normal project prompt.
-          }
-        }
-        setState(() {
-          _restored = true;
-          _agentMode = selected.isProject;
-          _sessionId = selected.id;
-          if (selected.isProject && selected.projectId != null) {
-            _projectSessionIds[selected.projectId!] = selected.id;
-          } else if (!selected.isProject) {
-            _chatSessionId = selected.id;
-          }
-          _messages.addAll(selected.messages);
-          _restoreActivity(selected.activity);
-        });
+      try {
+        await projectService.openProject(selected.projectId!);
+      } catch (_) {
+        // Keep the transcript available even if its project is no longer
+        // present; Project Mode will show the normal project prompt.
+      }
+    }
+    setState(() {
+      _restored = true;
+      _agentMode = selected.isProject;
+      _sessionId = selected.id;
+      if (selected.isProject && selected.projectId != null) {
+        _projectSessionIds[selected.projectId!] = selected.id;
+      } else if (!selected.isProject) {
+        _chatSessionId = selected.id;
+      }
+      _messages.addAll(collapseDuplicateSystemErrors(selected.messages));
+      _restoreActivity(selected.activity);
+    });
+    // Project session restored: sync the repository context NOW — same
+    // source of truth as the Explorer, never a reset on remount.
+    if (_agentMode) await _syncProjectContext();
       }
     } else if (fresh) {
       // Entering from Home: ALWAYS a brand-new conversation, like other
@@ -446,7 +463,7 @@ class _ChatScreenState extends State<ChatScreen> {
           } else {
             _chatSessionId = _sessionId;
           }
-          _messages.addAll(matching.first.messages);
+          _messages.addAll(collapseDuplicateSystemErrors(matching.first.messages));
           // Restore the saved task activity too (steps, reasoning,
           // progress, errors, result) so reopened chats look identical.
           _restoreActivity(matching.first.activity);
@@ -880,6 +897,14 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _push(String role, String content, {bool isError = false}) {
     if (!mounted) return; // async caller may outlive the screen
+    // Deduplicate consecutive identical messages: repeated taps, polling
+    // loops or re-renders must never stack identical cards in the thread.
+    if (_messages.isNotEmpty) {
+      final last = _messages.last;
+      if (last.role == role && last.isError == isError && last.content == content) {
+        return;
+      }
+    }
     setState(() => _messages.add(ChatMessage(role: role, content: content, isError: isError)));
     _scrollToBottom();
   }
@@ -1225,9 +1250,14 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _publishToGitHub() async {
-    final repo = await githubProjectStore.load();
+    final repo = await _resolveConnectedRepo();
     if (repo == null) {
-      _push('system', 'Connect and import a GitHub repository first from Integrations → GitHub.', isError: true);
+      // Only reached when EVERY source confirms no repository context:
+      // no saved metadata AND no recoverable imported-repo layout in the
+      // open project. One honest error — never a card per retry.
+      _push('system',
+          'Connect and import a GitHub repository first from Integrations → GitHub.',
+          isError: true);
       return;
     }
     try {
@@ -1236,6 +1266,69 @@ class _ChatScreenState extends State<ChatScreen> {
     } on GitHubException catch (e) {
       _push('system', e.message, isError: true);
     }
+  }
+
+  /// CANONICAL repository resolution — the same source of truth the Project
+  /// Explorer uses. Order:
+  /// 1. Persisted repo metadata (saved at GitHub import time).
+  /// 2. Recovered identity from the open project's imported zipball layout
+  ///    (single root folder `<owner>-<repo>-<sha>`); verified against the
+  ///    GitHub API and, when it matches, persisted so later runs are instant.
+  /// 3. A project with NO zipball wrapper (ZIP import / created project) is
+  ///    still a real local project — but it is not a GitHub repository, so
+  ///    this returns null and publishing explains what is missing, once.
+  Future<GitHubRepo?> _resolveConnectedRepo() async {
+    var repo = await githubProjectStore.load();
+    if (repo != null) return repo;
+
+    // Fall back to the open project's real, file-based context.
+    if (projectService.projectName == null) return null;
+    final recovered = githubRepoFromZipballLayout(projectService.rootEntryNames);
+    if (recovered == null) return null;
+
+    // Verify against GitHub (default branch + existence). If the token is
+    // missing or the API is unreachable, publish will fail with its own
+    // specific error — do not fabricate connection state here.
+    try {
+      repo = await githubService.fetchRepoDetails(recovered);
+    } on GitHubException {
+      repo = recovered; // offline: try with the parsed name/branch anyway
+    }
+    await githubProjectStore.save(repo); // self-heal for subsequent runs
+    return repo;
+  }
+
+  /// Project Mode initialization flow, run when entering Project Mode (and
+  /// once at screen init): active project → repository metadata → file
+  /// verification. Sets [_projectContextReady] only when the open project's
+  /// files actually exist on disk; syncs recovered repo metadata so the
+  /// publish gate and the Explorer agree.
+  Future<void> _syncProjectContext() async {
+    if (!_agentMode) return;
+    final name = projectService.projectName;
+    if (name == null) return;
+    var filesOk = false;
+    try {
+      filesOk = projectService.root.listSync(followLinks: false).isNotEmpty;
+    } on ProjectException {
+      filesOk = false;
+    } on FileSystemException {
+      filesOk = false;
+    }
+    // Load repo metadata and self-heal from the project layout when absent —
+    // same recovery the publish action uses, so Explorer and Project Mode
+    // never disagree about the same repository.
+    if (await githubProjectStore.load() == null) {
+      final recovered = githubRepoFromZipballLayout(projectService.rootEntryNames);
+      if (recovered != null) {
+        try {
+          await githubProjectStore.save(await githubService.fetchRepoDetails(recovered));
+        } on GitHubException {
+          await githubProjectStore.save(recovered);
+        }
+      }
+    }
+    if (mounted) setState(() => _projectContextReady = filesOk);
   }
 
   @override
@@ -1300,7 +1393,9 @@ class _ChatScreenState extends State<ChatScreen> {
               if (_messages.isEmpty)
                 Text(!_agentMode
                     ? 'Chat Mode is ready. Ask anything, study a topic, or attach a file to discuss it.\n\nProject files are not used unless you switch to Project Mode.'
-                    : 'Project Mode is active. Coding instructions can inspect and modify the open project.\n\nUse Chat Mode for normal questions and study conversations.',
+                    : !_projectContextReady && projectService.projectName != null
+                        ? 'Project Mode is active, but the open project folder could not be verified. Reopen it from the Project switcher.'
+                        : 'Project Mode is active. Coding instructions can inspect and modify the open project.\n\nUse Chat Mode for normal questions and study conversations.',
                     style: TextStyle(color: AppTheme.muted)),
               if (_messages.isEmpty && _recentSessions.isNotEmpty)
                 _ResumeCard(

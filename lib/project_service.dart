@@ -20,6 +20,25 @@ class ProjectService {
   /// Absolute path of the open project root (for the terminal cwd).
   String? get rootPath => _root?.path;
 
+  /// Names of the VISIBLE entries directly inside the open project root —
+  /// the same top level the Project Explorer shows. CodePilot's own hidden
+  /// markers (`.codepilot_project`, `.codepilot_manifest.json`, …) and other
+  /// dotfiles are excluded so callers see the project the user sees. Empty
+  /// when no project is open or the folder is unreadable; never throws.
+  List<String> get rootEntryNames {
+    try {
+      return root
+          .listSync()
+          .map((e) => p.basename(e.path))
+          .where((name) => !name.startsWith('.'))
+          .toList();
+    } on ProjectException {
+      return const [];
+    } on FileSystemException {
+      return const [];
+    }
+  }
+
   // ---------------- last-project persistence ----------------
 
   static const _kLastProject = 'last_project';

@@ -152,6 +152,35 @@ class GitHubRepo {
   String get fullName => '$owner/$name';
 }
 
+/// Derives repository identity from an ALREADY-IMPORTED GitHub zipball
+/// layout, so an existing project is recognized as connected without
+/// re-importing.
+///
+/// GitHub zipballs extract a single root folder named
+/// `<owner>-<repo>-<short-sha>` (e.g. `ismail53101-codepilot-mobile-12cea2d`),
+/// and [ProjectService.importZip] keeps that folder as the project's only
+/// top-level entry. A project whose root contains exactly one such folder is
+/// therefore an imported GitHub repository. Parsing is heuristic because the
+/// owner/repo/sha parts share one separator: the last hyphen segment must be
+/// a plausible git sha (7–40 hex chars), the first segment is the owner and
+/// the rest is the repo name. Returns null when the layout does not match,
+/// so callers fall back to the honest "not connected" state — never a fake.
+GitHubRepo? githubRepoFromZipballLayout(List<String> rootEntryNames,
+    {String branch = 'main'}) {
+  if (rootEntryNames.length != 1) return null; // zipball imports wrap ALL files
+  final parts = rootEntryNames.single.split('-');
+  if (parts.length < 3) return null; // owner-repo-sha needs 3+ segments
+  final sha = parts.last;
+  if (!RegExp(r'^[0-9a-f]{7,40}$').hasMatch(sha)) {
+    return null;
+  }
+  final owner = parts.first;
+  final repoName = parts.sublist(1, parts.length - 1).join('-');
+  if (owner.isEmpty || repoName.isEmpty) return null;
+  return GitHubRepo(
+      owner: owner, name: repoName, defaultBranch: branch, privateRepo: false);
+}
+
 /// GitHub REST integration. The token is kept in Android secure storage.
 class GitHubService {
   final SettingsStore store;
@@ -353,6 +382,19 @@ class GitHubService {
     if (response.statusCode != 200) throw GitHubException(_error(response));
     final data = jsonDecode(response.body) as List;
     return [for (final item in data) GitHubRepo.fromJson(item as Map<String, dynamic>)];
+  }
+
+  /// Fetch the repository's real metadata (default branch, existence).
+  /// Used after recovering owner/name from an imported zipball layout so
+  /// publishes target the branch GitHub actually reports. Throws
+  /// [GitHubException] when the API is unreachable or the repo is gone.
+  Future<GitHubRepo> fetchRepoDetails(GitHubRepo repo) async {
+    final headers = await _auth();
+    final response = await http.get(
+        Uri.parse('https://api.github.com/repos/${repo.owner}/${repo.name}'),
+        headers: headers);
+    if (response.statusCode != 200) throw GitHubException(_error(response));
+    return GitHubRepo.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
   }
 
   Future<String> importRepo(GitHubRepo repo, ProjectService projects) async {
