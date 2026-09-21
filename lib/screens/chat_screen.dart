@@ -1310,10 +1310,8 @@ class _ChatScreenState extends State<ChatScreen> {
     var filesOk = false;
     try {
       filesOk = projectService.root.listSync(followLinks: false).isNotEmpty;
-    } on ProjectException {
-      filesOk = false;
-    } on FileSystemException {
-      filesOk = false;
+    } catch (_) {
+      filesOk = false; // no project open, or the folder vanished/is unreadable
     }
     // Load repo metadata and self-heal from the project layout when absent —
     // same recovery the publish action uses, so Explorer and Project Mode
