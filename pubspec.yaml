@@ -21,6 +21,16 @@ dependencies:
   url_launcher: ^6.3.0     # GitHub OAuth device verification page
   webview_flutter: ^4.7.0   # live HTML preview of generated code
 
+dependency_overrides:
+  # file_picker 8.x is compiled against Android SDK 34, but the newest
+  # flutter_plugin_android_lifecycle releases declare minCompileSdk 36 —
+  # that combination fails the AAR metadata check under the latest Flutter
+  # stable (":file_picker is currently compiled against android-34").
+  # Pin the last lifecycle release built against SDK 34: it is
+  # API-compatible for every plugin that uses it and resolves under both
+  # the pinned CI Flutter (3.24) and the latest stable.
+  flutter_plugin_android_lifecycle: 2.0.17
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
