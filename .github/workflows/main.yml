@@ -23,6 +23,19 @@ jobs:
       - name: Flutter version
         run: flutter --version
 
+      # The repository keeps only selected Android resources; regenerate the
+      # platform project with the current Flutter toolchain so the build uses
+      # the supported Android v2 embedding instead of deleted v1 APIs.
+      - name: Generate Android v2 project
+        run: flutter create . --org com.codepilot --project-name codepilot_mobile
+
+      - name: Apply CodeFexa Android branding
+        run: |
+          mkdir -p android/app/src/main/res/drawable
+          cp assets/codefexa_logo.png android/app/src/main/res/drawable/codefexa_logo.png
+          sed -i 's/android:label="codepilot_mobile"/android:label="CodeFexa Mobile"/' android/app/src/main/AndroidManifest.xml
+          sed -i 's#android:icon="@mipmap/ic_launcher"#android:icon="@drawable/codefexa_logo"#' android/app/src/main/AndroidManifest.xml
+
       - name: Get dependencies
         run: flutter pub get
 
