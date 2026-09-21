@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -1486,13 +1487,17 @@ class _ChatScreenState extends State<ChatScreen> {
                   ? base64Decode(m.imageDataUrl!.substring(comma + 1))
                   : null;
               if (bytes == null) return const SizedBox.shrink();
-              return ClipRRect(
-                borderRadius: BorderRadius.circular(10),
-                child: Image.memory(
-                  bytes,
-                  width: 220,
-                  fit: BoxFit.cover,
-                  errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+              return GestureDetector(
+                onTap: () => _showImageViewer(bytes, m.attachmentName),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(11),
+                  child: Image.memory(
+                    bytes,
+                    width: 120,
+                    height: 120,
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+                  ),
                 ),
               );
             }),
@@ -1526,6 +1531,36 @@ class _ChatScreenState extends State<ChatScreen> {
           else
             _AssistantBody(content: m.content, isError: m.isError),
         ]),
+      ),
+    );
+  }
+
+  void _showImageViewer(Uint8List bytes, String? name) {
+    showDialog<void>(
+      context: context,
+      barrierColor: Colors.black.withOpacity(.92),
+      builder: (dialogContext) => Dialog(
+        backgroundColor: Colors.transparent,
+        insetPadding: const EdgeInsets.all(12),
+        child: Stack(
+          alignment: Alignment.topRight,
+          children: [
+            InteractiveViewer(
+              minScale: .5,
+              maxScale: 4,
+              child: Image.memory(bytes, fit: BoxFit.contain),
+            ),
+            Material(
+              color: Colors.black54,
+              shape: const CircleBorder(),
+              child: IconButton(
+                tooltip: name == null ? 'Close image' : 'Close $name',
+                icon: const Icon(Icons.close, color: Colors.white),
+                onPressed: () => Navigator.pop(dialogContext),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
