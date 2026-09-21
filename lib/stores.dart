@@ -222,6 +222,7 @@ class ChatSession {
   final DateTime time;
   final List<ChatMessage> messages;
   final bool isProject;
+  final String? projectId;
 
   /// Agent activity snapshot (timeline entries + task state + timings),
   /// stored as raw JSON maps so old sessions without activity still load.
@@ -233,6 +234,7 @@ class ChatSession {
     required this.time,
     required this.messages,
     this.isProject = false,
+    this.projectId,
     this.activity,
   });
 
@@ -242,6 +244,7 @@ class ChatSession {
         time: DateTime.now(),
         messages: messages,
         isProject: isProject,
+        projectId: projectId,
       );
 }
 
@@ -270,6 +273,7 @@ class ChatSessionStore {
               title: (item['title'] as String?) ?? 'Chat',
               time: DateTime.tryParse((item['time'] as String?) ?? '') ?? DateTime.now(),
               isProject: (item['isProject'] as bool?) ?? false,
+              projectId: item['projectId'] as String?,
               messages: [
                 for (final m in (item['messages'] as List?) ?? const [])
                   if (m is Map) ChatMessage.fromJson(Map<String, dynamic>.from(m)),
@@ -288,7 +292,7 @@ class ChatSessionStore {
   /// the stored session so first-time callers can adopt it and keep
   /// updating the SAME session on subsequent saves (no duplicates when a
   /// thread is persisted mid-run).
-  Future<String> save({required String? existingId, required String title, required List<ChatMessage> messages, bool isProject = false, Map<String, dynamic>? activity}) async {
+  Future<String> save({required String? existingId, required String title, required List<ChatMessage> messages, bool isProject = false, String? projectId, Map<String, dynamic>? activity}) async {
     if (messages.isEmpty) return existingId ?? '';
     final id = existingId ?? DateTime.now().microsecondsSinceEpoch.toString();
     // Mutable copy — load() is documented mutable, but copy defensively so
@@ -303,6 +307,7 @@ class ChatSessionStore {
         time: DateTime.now(),
         messages: messages,
         isProject: isProject,
+        projectId: projectId,
         activity: activity,
       ),
     );
@@ -314,6 +319,7 @@ class ChatSessionStore {
           'title': s.title,
           'time': s.time.toIso8601String(),
           'isProject': s.isProject,
+          if (s.projectId != null) 'projectId': s.projectId,
           'messages': [for (final m in s.messages) m.toJson()],
           if (s.activity != null) 'activity': s.activity,
         },
@@ -334,6 +340,7 @@ class ChatSessionStore {
           'title': s.title,
           'time': s.time.toIso8601String(),
           'isProject': s.isProject,
+          if (s.projectId != null) 'projectId': s.projectId,
           'messages': [for (final m in s.messages) m.toJson()],
           // Keep every remaining session's task activity — deleting one chat
           // must never erase the persisted agent state of the others.
@@ -357,6 +364,26 @@ class ChatSessionStore {
           'title': s.title,
           'time': s.time.toIso8601String(),
           'isProject': s.isProject,
+          if (s.projectId != null) 'projectId': s.projectId,
+          'messages': [for (final m in s.messages) m.toJson()],
+          if (s.activity != null) 'activity': s.activity,
+        },
+    ]));
+  }
+
+  Future<void> clearProject(String projectId) async {
+    final sessions = (await load())
+        .where((s) => !s.isProject || s.projectId != projectId)
+        .toList();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_kSessions, jsonEncode([
+      for (final s in sessions)
+        {
+          'id': s.id,
+          'title': s.title,
+          'time': s.time.toIso8601String(),
+          'isProject': s.isProject,
+          if (s.projectId != null) 'projectId': s.projectId,
           'messages': [for (final m in s.messages) m.toJson()],
           if (s.activity != null) 'activity': s.activity,
         },

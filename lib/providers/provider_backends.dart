@@ -169,8 +169,8 @@ class OpenAiCompatibleBackend extends AiProviderBackend
     providerName: config.displayName,
     baseUrl: config.effectiveBaseUrl,
     modelId: config.model,
-    requestTimeout: 180,
-    streaming: false,
+    requestTimeout: 3600,
+    streaming: true,
   );
 
   Uri _uri(String path) => Uri.parse(
@@ -226,7 +226,7 @@ class OpenAiCompatibleBackend extends AiProviderBackend
       _uri('/chat/completions'),
       _headers,
       _body(messages, tools: tools),
-      timeoutSeconds: timeoutSeconds ?? 180,
+      timeoutSeconds: timeoutSeconds ?? 3600,
       cancelToken: cancelToken,
     );
     if (resp.statusCode != 200) throw _statusError(resp, config);
@@ -251,7 +251,7 @@ class OpenAiCompatibleBackend extends AiProviderBackend
       _uri('/chat/completions'),
       _headers,
       _body(messages, stream: true),
-      timeoutSeconds: timeoutSeconds ?? 180,
+      timeoutSeconds: timeoutSeconds ?? 3600,
       cancelToken: cancelToken,
       onError: (r) => _statusError(r, config),
     );
@@ -454,7 +454,7 @@ class GeminiBackend extends AiProviderBackend
       _uri(config.model, 'generateContent'),
       _headers,
       _convert(messages, tools: tools),
-      timeoutSeconds: timeoutSeconds ?? 180,
+      timeoutSeconds: timeoutSeconds ?? 3600,
       cancelToken: cancelToken,
     );
     if (resp.statusCode != 200) throw _statusError(resp, config);
@@ -505,7 +505,7 @@ class GeminiBackend extends AiProviderBackend
       _uri(config.model, 'streamGenerateContent?alt=sse'),
       _headers,
       _convert(messages),
-      timeoutSeconds: timeoutSeconds ?? 180,
+      timeoutSeconds: timeoutSeconds ?? 3600,
       cancelToken: cancelToken,
       onError: (r) => _statusError(r, config),
     );
@@ -702,7 +702,7 @@ class AnthropicBackend extends AiProviderBackend {
       _uri,
       _headers,
       _convert(messages, tools: tools),
-      timeoutSeconds: timeoutSeconds ?? 180,
+      timeoutSeconds: timeoutSeconds ?? 3600,
       cancelToken: cancelToken,
     );
     if (resp.statusCode != 200) throw _statusError(resp, config);

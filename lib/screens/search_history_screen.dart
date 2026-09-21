@@ -38,7 +38,9 @@ class _SearchHistoryScreenState extends State<SearchHistoryScreen> {
     if (!mounted) return;
     setState(() {
       _chatHistory = sessions.where((s) => !s.isProject).toList();
-      _projectHistoryItems = sessions.where((s) => s.isProject).toList();
+      _projectHistoryItems = sessions
+          .where((s) => s.isProject && s.projectId == projectService.projectName)
+          .toList();
       _loading = false;
     });
   }
@@ -58,7 +60,11 @@ class _SearchHistoryScreenState extends State<SearchHistoryScreen> {
       ),
     );
     if (confirmed == true) {
-      await chatSessionStore.clearMode(_projectHistory);
+      if (_projectHistory && projectService.projectName != null) {
+        await chatSessionStore.clearProject(projectService.projectName!);
+      } else {
+        await chatSessionStore.clearMode(false);
+      }
       await _refresh();
     }
   }

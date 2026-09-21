@@ -46,6 +46,7 @@ class _SearchResultsScreenState extends State<SearchResultsScreen> {
         final all = await chatSessionStore.load();
         final needle = q.toLowerCase();
         final matches = all.where((s) {
+          if (s.isProject) return false;
           if (s.title.toLowerCase().contains(needle)) return true;
           return s.messages.any((m) => m.content.toLowerCase().contains(needle));
         }).toList();

@@ -45,6 +45,8 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _restored = false;
   String? _streamBuf;
   String? _sessionId;
+  String? _chatSessionId;
+  final Map<String, String?> _projectSessionIds = {};
   // Content of a file attached on Home (route argument), injected once.
   String? _pendingAttachment;
   String? _pendingAttachmentName;
@@ -200,10 +202,65 @@ class _ChatScreenState extends State<ChatScreen> {
   bool get _hasPendingAttachment =>
       _pendingAttachmentName != null || _pendingImage != null;
 
+  String? get _activeProjectId => _agentMode ? projectService.projectName : null;
+
+  Future<void> _switchConversation({required bool project}) async {
+    if (!mounted) return;
+    final sessions = await chatSessionStore.load();
+    final projectId = project ? projectService.projectName : null;
+    final preferredId = project
+        ? (projectId == null ? null : _projectSessionIds[projectId])
+        : _chatSessionId;
+    ChatSession? chosen;
+    ChatSession? fallback;
+    for (final session in sessions) {
+      final matchesScope = session.isProject == project &&
+          (!project || session.projectId == projectId ||
+              (session.projectId == null && projectId == null));
+      if (!matchesScope) continue;
+      fallback ??= session;
+      if (preferredId == null || session.id == preferredId) {
+        chosen = session;
+        break;
+      }
+    }
+    if (chosen == null && (project || preferredId != null)) {
+      chosen = fallback;
+    }
+    if (!mounted) return;
+    setState(() {
+      _agentMode = project;
+      _messages.clear();
+      _pending.clear();
+      _clearAttachmentState();
+      _streamBuf = null;
+      _timeline.clear();
+      _input.clear();
+      _recentSessions = const [];
+      _sessionId = chosen?.id;
+      _taskStart = null;
+      _taskEnd = null;
+      _agentState = AgentTaskState.idle;
+      _agentError = null;
+      _taskId = null;
+      _lastAgentRequest = null;
+      _resumeContext = null;
+      if (chosen != null) {
+        _messages.addAll(chosen.messages);
+        _restoreActivity(chosen.activity);
+      }
+    });
+    _scrollDown();
+  }
+
   Future<void> _setProjectMode(bool project) async {
     if (_busy || _agentMode == project) return;
     if (!project) {
-      setState(() => _agentMode = false);
+      await _saveSession();
+      if (_sessionId != null && projectService.projectName != null) {
+        _projectSessionIds[projectService.projectName!] = _sessionId;
+      }
+      await _switchConversation(project: false);
       return;
     }
     final projects = await projectService.listProjects();
@@ -242,9 +299,11 @@ class _ChatScreenState extends State<ChatScreen> {
     );
     if (!mounted || chosen == null) return;
     try {
+      await _saveSession();
+      if (_sessionId != null) _chatSessionId = _sessionId;
       await projectService.openProject(chosen);
       if (!mounted) return;
-      setState(() => _agentMode = true);
+      await _switchConversation(project: true);
     } on ProjectException catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
     }
@@ -330,10 +389,23 @@ class _ChatScreenState extends State<ChatScreen> {
       if (!mounted) return;
       if (chosen != null) {
         final selected = chosen;
+        if (selected.isProject && selected.projectId != null) {
+          try {
+            await projectService.openProject(selected.projectId!);
+          } catch (_) {
+            // Keep the transcript available even if its project is no longer
+            // present; Project Mode will show the normal project prompt.
+          }
+        }
         setState(() {
           _restored = true;
           _agentMode = selected.isProject;
           _sessionId = selected.id;
+          if (selected.isProject && selected.projectId != null) {
+            _projectSessionIds[selected.projectId!] = selected.id;
+          } else if (!selected.isProject) {
+            _chatSessionId = selected.id;
+          }
           _messages.addAll(selected.messages);
           _restoreActivity(selected.activity);
         });
@@ -360,9 +432,16 @@ class _ChatScreenState extends State<ChatScreen> {
       if (!mounted) return;
       setState(() {
         _restored = true;
-        final matching = sessions.where((s) => s.isProject == _agentMode).toList();
+        final matching = sessions.where((s) =>
+            s.isProject == _agentMode &&
+            (!_agentMode || s.projectId == projectService.projectName)).toList();
         if (matching.isNotEmpty) {
           _sessionId = matching.first.id;
+          if (_agentMode && projectService.projectName != null) {
+            _projectSessionIds[projectService.projectName!] = _sessionId;
+          } else {
+            _chatSessionId = _sessionId;
+          }
           _messages.addAll(matching.first.messages);
           // Restore the saved task activity too (steps, reasoning,
           // progress, errors, result) so reopened chats look identical.
@@ -498,16 +577,26 @@ class _ChatScreenState extends State<ChatScreen> {
       title: _sessionTitle,
       messages: List.of(_messages),
       isProject: _agentMode,
+      projectId: _activeProjectId,
       activity: _activitySnapshot(),
     );
     if (id.isNotEmpty && _sessionId == null) {
       _sessionId = id;
     }
+    if (id.isNotEmpty) {
+      if (_agentMode && _activeProjectId != null) {
+        _projectSessionIds[_activeProjectId!] = id;
+      } else if (!_agentMode) {
+        _chatSessionId = id;
+      }
+    }
   }
 
   Future<void> _openChatHistory() async {
     final allSessions = await chatSessionStore.load();
-    final sessions = allSessions.where((s) => s.isProject == _agentMode).toList();
+    final sessions = allSessions.where((s) =>
+        s.isProject == _agentMode &&
+        (!_agentMode || s.projectId == projectService.projectName)).toList();
     if (!mounted) return;
     Object? sheetResult;
     await showModalBottomSheet<void>(
@@ -541,7 +630,11 @@ class _ChatScreenState extends State<ChatScreen> {
                 onPressed: sessions.isEmpty
                     ? null
                     : () async {
-                        await chatSessionStore.clearAll();
+                        if (_agentMode && projectService.projectName != null) {
+                          await chatSessionStore.clearProject(projectService.projectName!);
+                        } else {
+                          await chatSessionStore.clearMode(false);
+                        }
                         if (sheetContext.mounted) Navigator.pop(sheetContext);
                       },
               ),
@@ -598,6 +691,11 @@ class _ChatScreenState extends State<ChatScreen> {
     if (chosen is ChatSession) {
       setState(() {
         _sessionId = chosen.id;
+        if (_agentMode && projectService.projectName != null) {
+          _projectSessionIds[projectService.projectName!] = chosen.id;
+        } else {
+          _chatSessionId = chosen.id;
+        }
         _messages
           ..clear()
           ..addAll(chosen.messages);
@@ -621,18 +719,26 @@ class _ChatScreenState extends State<ChatScreen> {
     setState(() {
       _messages.clear();
       _pending.clear();
+      _clearAttachmentState();
+      _streamBuf = null;
       _sessionId = null;
+      if (_agentMode && projectService.projectName != null) {
+        _projectSessionIds.remove(projectService.projectName);
+      } else {
+        _chatSessionId = null;
+      }
       _taskId = null;
       _lastAgentRequest = null;
       _resumeContext = null;
-      _agentMode = false;
       _timeline.clear();
       _taskStart = null;
       _taskEnd = null;
       _agentState = AgentTaskState.idle;
       _agentError = null;
     });
-    _push('system', 'New chat. Chat Mode is active and no project is selected.');
+    _push('system', _agentMode
+        ? 'New project conversation. Project Mode is active.'
+        : 'New chat. Chat Mode is active and no project is selected.');
   }
 
   /// Re-open the previous thread without losing the current one (it is
@@ -644,6 +750,7 @@ class _ChatScreenState extends State<ChatScreen> {
     if (!mounted) return;
     setState(() {
       _sessionId = chosen.id;
+      _chatSessionId = chosen.id;
       _messages
         ..clear()
         ..addAll(chosen.messages);
@@ -721,23 +828,19 @@ class _ChatScreenState extends State<ChatScreen> {
             )),
       ];
 
-      final settings = await settingsStore.load();
       String reply;
-      if (settings.streaming) {
-        final buf = StringBuffer();
-        // Provider router: streams through the highest-priority capable
-        // provider and falls back down the configured chain.
-        await for (final piece in aiRouter.streamWithFallback(messages)) {
-          buf.write(piece);
-          if (!mounted) return; // user left the screen — stop stream updates
-          setState(() => _streamBuf = buf.toString());
-        }
-        reply = buf.toString();
-        if (!mounted) return;
-        setState(() => _streamBuf = null);
-      } else {
-        reply = await aiRouter.chatWithFallback(messages);
+      final buf = StringBuffer();
+      // Use the provider's real SSE/chunk stream whenever supported. The
+      // router falls back to a completed response only for providers that do
+      // not implement streaming; no artificial client-side delays are used.
+      await for (final piece in aiRouter.streamWithFallback(messages)) {
+        buf.write(piece);
+        if (!mounted) return; // user left the screen — stop stream updates
+        setState(() => _streamBuf = buf.toString());
       }
+      reply = buf.toString();
+      if (!mounted) return;
+      setState(() => _streamBuf = null);
       if (!mounted) return;
 
       final parsed = AgentService.parseReply(reply);
@@ -759,7 +862,12 @@ class _ChatScreenState extends State<ChatScreen> {
       if (mounted) _input.text = text;
       _push('system', 'Unexpected error: $e\nTap send to retry.', isError: true);
     } finally {
-      if (mounted) setState(() => _busy = false);
+      if (mounted) {
+        setState(() {
+          _busy = false;
+          _streamBuf = null;
+        });
+      }
       _scrollDown();
     }
   }
@@ -793,6 +901,11 @@ class _ChatScreenState extends State<ChatScreen> {
       _busy = true;
       _agentState = AgentTaskState.running;
       _agentError = null;
+      if (resume) {
+        // Archive the prior active failure banner while retaining the
+        // persisted activity/checkpoint data for debugging and resume.
+        _messages.removeWhere((m) => m.isError && m.content.startsWith('✕ Task failed'));
+      }
       _lastAgentRequest = text;
       if (!resume) {
         _taskId = DateTime.now().microsecondsSinceEpoch.toString();
@@ -805,6 +918,7 @@ class _ChatScreenState extends State<ChatScreen> {
       if (!resume) _clearAttachmentState();
     });
     _input.clear();
+    if (resume) _push('system', 'Resuming from checkpoint…');
     // Persist the task text IMMEDIATELY — backing out mid-run must not
     // erase it (the final save only happens if the run completes on-screen).
     unawaited(_saveSession());
@@ -902,12 +1016,15 @@ class _ChatScreenState extends State<ChatScreen> {
           ? _messages.sublist(_messages.length - 10)
           : _messages;
       // Belt-and-braces: even if a backend ignored cancellation, this
-      // timeout guarantees _agentSend terminates. Each step is bounded by
-      // the loop's step watchdog; 30 min covers ~10 worst-case steps.
+      // maximum application window guarantees _agentSend terminates. Active
+      // provider streams are not interrupted before this 60-minute ceiling.
       await loop.run(
         effectiveRequest,
         priorHistory: prior.sublist(0, prior.length - 1), // exclude this turn
-      ).timeout(const Duration(minutes: 30), onTimeout: () => '');
+      ).timeout(const Duration(minutes: 60), onTimeout: () {
+        loop.cancel();
+        return '';
+      });
       // Wait for the outcome event so the final state and banner are applied
       // in the same tick; the loop guarantees exactly one outcome.
       await outcomeDone.future.timeout(const Duration(seconds: 2),
@@ -1117,7 +1234,22 @@ class _ChatScreenState extends State<ChatScreen> {
           final rec = agentService.undoLast();
           _push('system', rec == null ? 'Nothing to undo.' : 'Undone: ${rec.kind} ${rec.path}');
         }),
-        IconButton(icon: const Icon(Icons.cleaning_services), tooltip: 'Clear this chat', onPressed: () => setState(() { _messages.clear(); _pending.clear(); _sessionId = null; })),
+        IconButton(
+          icon: const Icon(Icons.cleaning_services),
+          tooltip: 'Clear this chat',
+          onPressed: () => setState(() {
+            _messages.clear();
+            _pending.clear();
+            _clearAttachmentState();
+            _streamBuf = null;
+            _sessionId = null;
+            if (_agentMode && projectService.projectName != null) {
+              _projectSessionIds.remove(projectService.projectName);
+            } else {
+              _chatSessionId = null;
+            }
+          }),
+        ),
       ]),
       body: Column(children: [
         Padding(
@@ -1186,11 +1318,11 @@ class _ChatScreenState extends State<ChatScreen> {
                       : null,
                 ),
               if (_streamBuf != null) _bubble(ChatMessage(role: 'assistant', content: '$_streamBuf▍')),
-              if (_busy &&
-                  _streamBuf == null &&
-                  _timeline.isEmpty &&
-                  _agentState == AgentTaskState.idle)
-                const Padding(padding: EdgeInsets.all(8), child: Center(child: CircularProgressIndicator())),
+              if (_busy && _streamBuf == null && _agentState == AgentTaskState.idle)
+                const Padding(
+                  padding: EdgeInsets.all(8),
+                  child: Center(child: Text('Generating…', style: TextStyle(color: AppTheme.muted))),
+                ),
               for (var i = 0; i < _pending.length; i++) _pendingCard(i),
               ],
             ),

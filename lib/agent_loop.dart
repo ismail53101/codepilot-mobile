@@ -97,7 +97,7 @@ class AgentLoop {
     required this.projects,
     this.mode = AgentMode.auto,
     this.maxRounds = 10,
-    this.stepTimeout = const Duration(minutes: 3),
+    this.stepTimeout = const Duration(minutes: 60),
   });
 
   final _events = StreamController<AgentEvent>.broadcast();

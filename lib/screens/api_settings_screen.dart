@@ -20,8 +20,8 @@ class _ApiSettingsScreenState extends State<ApiSettingsScreen> {
   final _baseUrl = TextEditingController();
   final _model = TextEditingController(text: 'qwen/qwen3.7-flash:free');
   final _key = TextEditingController();
-  final _timeout = TextEditingController(text: '180');
-  bool _streaming = false;
+  final _timeout = TextEditingController(text: '3600');
+  bool _streaming = true;
   bool _keyVisible = false;
   bool _busy = false;
   bool _testing = false;
@@ -65,7 +65,7 @@ class _ApiSettingsScreenState extends State<ApiSettingsScreen> {
         providerName: _name.text.trim().isEmpty ? 'xKiro' : _name.text.trim(),
         baseUrl: url,
         modelId: _model.text.trim(),
-        requestTimeout: (int.tryParse(_timeout.text) ?? 180).clamp(5, 600),
+        requestTimeout: (int.tryParse(_timeout.text) ?? 3600).clamp(5, 3600),
         streaming: _streaming,
       );
       await settingsStore.save(s);
@@ -130,7 +130,7 @@ class _ApiSettingsScreenState extends State<ApiSettingsScreen> {
                 }),
               ])),
           Row(children: [
-            Expanded(child: _field('Request timeout (s)', _timeout, '180', number: true)),
+            Expanded(child: _field('Request timeout (s)', _timeout, '3600', number: true)),
             const SizedBox(width: 12),
             Expanded(child: SwitchListTile(
               contentPadding: EdgeInsets.zero,

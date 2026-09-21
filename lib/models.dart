@@ -14,8 +14,8 @@ class ApiSettings {
     this.providerName = 'xKiro',
     this.baseUrl = 'https://api.xkiro.com/v1',
     this.modelId = 'qwen/qwen3.7-flash:free',
-    this.requestTimeout = 180,
-    this.streaming = false,
+    this.requestTimeout = 3600,
+    this.streaming = true,
   });
 
   bool get hasBaseUrl => baseUrl.trim().isNotEmpty;
@@ -47,8 +47,10 @@ class ApiSettings {
         providerName: (j['providerName'] as String?) ?? 'xKiro',
         baseUrl: (j['baseUrl'] as String?) ?? 'https://api.xkiro.com/v1',
         modelId: (j['modelId'] as String?) ?? 'qwen/qwen3.7-flash:free',
-        requestTimeout: (j['requestTimeout'] as num?)?.toInt() ?? 180,
-        streaming: (j['streaming'] as bool?) ?? false,
+        requestTimeout: (j['requestTimeout'] as num?)?.toInt() == 180
+            ? 3600
+            : ((j['requestTimeout'] as num?)?.toInt() ?? 3600),
+        streaming: (j['streaming'] as bool?) ?? true,
       );
 }
 
