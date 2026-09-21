@@ -48,6 +48,23 @@ jobs:
             sed -i 's/compileSdk = flutter.compileSdkVersion/compileSdk = 36/' android/app/build.gradle
             sed -i 's/compileSdk flutter.compileSdkVersion/compileSdk 36/' android/app/build.gradle
           fi
+          # Plugin subprojects pin literal compileSdk values (often 34/35).
+          # Newer plugin AARs declare minCompileSdk 36, which then fails the
+          # AAR metadata check (":file_picker is currently compiled against
+          # android-34"). Raise the literal pins to 36; plugins that use
+          # flutter.compileSdkVersion already resolve to 36 on this Flutter.
+          find "${PUB_CACHE:-$HOME/.pub-cache}/hosted" \( -name build.gradle -o -name build.gradle.kts \) \
+            -path "*android*" -type f 2>/dev/null | while read -r f; do
+              case "$f" in
+              *build.gradle.kts)
+                sed -i -E 's/compileSdk ?= ?[0-9]+/compileSdk = 36/' "$f" ;;
+              *)
+                sed -i -E 's/compileSdkVersion ?= ?[0-9]+/compileSdkVersion = 36/
+                            s/compileSdkVersion [0-9]+/compileSdkVersion 36/
+                            s/compileSdk ?= ?[0-9]+/compileSdk = 36/
+                            s/compileSdk [0-9]+/compileSdk 36/' "$f" ;;
+              esac
+            done
 
       - name: Apply CodeFexa Android branding
         run: |
