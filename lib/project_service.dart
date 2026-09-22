@@ -103,19 +103,19 @@ class ProjectService {
     await updateManifest({'changedFiles': changed});
   }
 
-  /// Snapshot of every project file (path → content) excluding CodePilot's
-  /// own metadata files. This is the payload used for real GitHub tree
-  /// commits — one canonical copy shared by the agent tools and the publish
-  /// button so both publish exactly what the Explorer shows.
-  Map<String, String?> snapshotFiles() {
-    final files = <String, String?>{};
+  /// Snapshot of every project file as raw bytes, excluding CodePilot's own
+  /// metadata files. This is the payload used for real GitHub tree commits.
+  /// Keeping bytes all the way through prevents PNG/JPEG/PDF/JAR/etc. files
+  /// from ever being decoded as UTF-8 during publish preparation.
+  Map<String, List<int>?> snapshotFiles() {
+    final files = <String, List<int>?>{};
     for (final node in fileTree()) {
       if (node.isDir) continue;
       if (node.path == '.codepilot_manifest.json' ||
           node.path == '.codepilot_project') {
         continue;
       }
-      files[node.path] = readFile(node.path);
+      files[node.path] = readFileBytes(node.path);
     }
     return files;
   }
@@ -139,8 +139,8 @@ class ProjectService {
     for (final node in fileTree()) {
       if (node.isDir || node.path == '.codepilot_manifest.json') continue;
       seen.add(node.path);
-      final content = readFile(node.path);
-      final hash = content == null ? '' : content.hashCode.toRadixString(36);
+      final bytes = readFileBytes(node.path);
+      final hash = bytes == null ? '' : _bytesHash(bytes);
       if (!baseline.containsKey(node.path)) {
         out.add(GitFileChange(node.path, 'A'));
       } else if (baseline[node.path] != hash) {
@@ -158,8 +158,8 @@ class ProjectService {
     final hashes = <String, String>{};
     for (final node in fileTree()) {
       if (node.isDir || node.path == '.codepilot_manifest.json') continue;
-      final content = readFile(node.path);
-      if (content != null) hashes[node.path] = content.hashCode.toRadixString(36);
+      final bytes = readFileBytes(node.path);
+      if (bytes != null) hashes[node.path] = _bytesHash(bytes);
     }
     await updateManifest({'baselineHashes': hashes});
   }
@@ -380,10 +380,84 @@ class ProjectService {
     '__pycache__', '.venv', 'dist', '.next', 'Pods',
   };
 
-  String? readFile(String rel) {
+  /// Read a project file without ever decoding it as text.
+  /// The returned bytes are safe for text and binary files alike.
+  List<int>? readFileBytes(String rel) {
     final f = resolveFile(rel);
     if (!f.existsSync()) return null;
-    return f.readAsStringSync();
+    return f.readAsBytesSync();
+  }
+
+  /// Read a project file as text for agent/editor features. Binary or
+  /// malformed UTF-8 files return null instead of throwing a
+  /// FileSystemException, so callers cannot accidentally break a project
+  /// scan by opening an image or archive.
+  String? readFile(String rel) {
+    final bytes = readFileBytes(rel);
+    if (bytes == null) return null;
+    if (_looksBinary(bytes) || !_isValidUtf8(bytes)) return null;
+    return utf8.decode(bytes);
+  }
+
+  String _bytesHash(List<int> bytes) =>
+      bytes.fold<int>(bytes.length, (hash, byte) =>
+          ((hash * 31) ^ byte) & 0x7fffffff).toRadixString(36);
+
+  bool _looksBinary(List<int> bytes) {
+    // NUL and other control bytes are not valid project source text. This
+    // supplements the signature checks for binary formats that happen to
+    // contain an ASCII-looking header.
+    final sampleLength = bytes.length < 512 ? bytes.length : 512;
+    for (var i = 0; i < sampleLength; i++) {
+      final byte = bytes[i];
+      if (byte == 0 || (byte < 9 || (byte > 13 && byte < 32))) return true;
+    }
+    bool startsWith(List<int> signature) {
+      if (bytes.length < signature.length) return false;
+      for (var i = 0; i < signature.length; i++) {
+        if (bytes[i] != signature[i]) return false;
+      }
+      return true;
+    }
+    return startsWith(const [0x89, 0x50, 0x4e, 0x47]) || // PNG
+        startsWith(const [0xff, 0xd8, 0xff]) || // JPEG
+        startsWith(const [0x47, 0x49, 0x46, 0x38]) || // GIF
+        startsWith(const [0x52, 0x49, 0x46, 0x46]) || // RIFF/WEBP
+        startsWith(const [0x25, 0x50, 0x44, 0x46]) || // PDF
+        startsWith(const [0x50, 0x4b, 0x03, 0x04]) || // ZIP/JAR/AAR
+        startsWith(const [0x7f, 0x45, 0x4c, 0x46]) || // ELF/SO
+        startsWith(const [0xca, 0xfe, 0xba, 0xbe]); // Java class
+  }
+
+  /// Validate UTF-8 at the byte level, without decoding the bytes. This
+  /// keeps unknown binary formats out of the text decoder even when they do
+  /// not have a recognized file signature.
+  bool _isValidUtf8(List<int> bytes) {
+    for (var i = 0; i < bytes.length;) {
+      final first = bytes[i++];
+      if (first <= 0x7f) continue;
+      var continuation = 0;
+      int min;
+      if (first >= 0xc2 && first <= 0xdf) {
+        continuation = 1;
+        min = 0x80;
+      } else if (first >= 0xe0 && first <= 0xef) {
+        continuation = 2;
+        min = first == 0xe0 ? 0xa0 : 0x80;
+      } else if (first >= 0xf0 && first <= 0xf4) {
+        continuation = 3;
+        min = first == 0xf0 ? 0x90 : 0x80;
+      } else {
+        return false;
+      }
+      if (i + continuation > bytes.length) return false;
+      if (bytes[i] < min || bytes[i] > 0xbf) return false;
+      for (var j = 1; j < continuation; j++) {
+        if (bytes[i + j] < 0x80 || bytes[i + j] > 0xbf) return false;
+      }
+      i += continuation;
+    }
+    return true;
   }
 
   /// Write inside the project (used only by the confirmed agent flow).
@@ -455,14 +529,8 @@ class ProjectService {
     final hits = <SearchHit>[];
     for (final node in fileTree()) {
       if (node.isDir || node.size > 512 * 1024) continue;
-      final f = File(p.join(root.path, node.path));
-      String content;
-      try {
-        content = f.readAsStringSync();
-      } catch (_) {
-        continue; // binary or unreadable
-      }
-      if (_binary(content)) continue;
+      final content = readFile(node.path);
+      if (content == null) continue; // binary, malformed, or unreadable
       final lines = content.split('\n');
       for (var i = 0; i < lines.length && hits.length < 300; i++) {
         final line = lines[i];
@@ -471,14 +539,6 @@ class ProjectService {
       }
     }
     return hits;
-  }
-
-  bool _binary(String s) {
-    final check = s.length > 512 ? s.substring(0, 512) : s;
-    for (final ch in check.codeUnits) {
-      if (ch < 9 || (ch > 13 && ch < 32)) return true;
-    }
-    return false;
   }
 
   /// Internal metadata / runtime files that must never appear in an

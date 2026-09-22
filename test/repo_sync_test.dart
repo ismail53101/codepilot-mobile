@@ -81,6 +81,24 @@ void main() {
       expect(snap.keys, isNot(contains('.codepilot_manifest.json')));
       expect(snap.keys, isNot(contains('.codepilot_project')));
     });
+
+    test('snapshotFiles preserves codefexa_logo.png as raw bytes', () async {
+      final svc = await newProject('binary-demo');
+      final png = <int>[
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+        0x00, 0xff, 0x00, 0x80,
+      ];
+      final file = File(p.join(
+          svc.root.path, 'android/app/src/main/res/drawable/codefexa_logo.png'))
+        ..createSync(recursive: true)
+        ..writeAsBytesSync(png);
+
+      final snapshot = svc.snapshotFiles();
+      expect(snapshot['android/app/src/main/res/drawable/codefexa_logo.png'],
+          orderedEquals(png));
+      expect(file.readAsBytesSync(), orderedEquals(png));
+      await expectLater(svc.changedFilesSinceBaseline(), completes);
+    });
   });
 
   group('manifest round-trip with null (stale-link clearing)', () {

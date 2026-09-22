@@ -453,7 +453,7 @@ class ToolRegistry {
   /// Delegates to the canonical [ProjectService.snapshotFiles] — the same
   /// payload the publish button sends, so agent commits and manual publishes
   /// always upload exactly what the Explorer shows.
-  Map<String, String?> _snapshotFiles() => projects.snapshotFiles();
+  Map<String, List<int>?> _snapshotFiles() => projects.snapshotFiles();
 
   /// The linked GitHub repository for the ACTIVE PROJECT — canonical
   /// resolution via [GitHubProjectStore.resolveForActiveProject].

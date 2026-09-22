@@ -503,14 +503,17 @@ class GitHubService {
 
   /// Create a blob for [content] and return its sha.
   Future<String> _createBlob(
-      GitHubRepo repo, String content, Map<String, String> headers) async {
+      GitHubRepo repo, List<int> bytes, Map<String, String> headers) async {
     final response = await http
         .post(
           Uri.parse(
               'https://api.github.com/repos/${repo.owner}/${repo.name}/git/blobs'),
           headers: headers,
           body: jsonEncode({
-            'content': base64Encode(utf8.encode(content)),
+            // GitHub's Git Data API accepts base64 for both text and binary
+            // blobs. Never decode project bytes as UTF-8 here: images,
+            // archives, keystores, and native libraries must stay lossless.
+            'content': base64Encode(bytes),
             'encoding': 'base64',
           }),
         )
@@ -521,14 +524,14 @@ class GitHubService {
 
   /// Create a REAL git commit on [branch] from a full working-tree snapshot.
   ///
-  /// [files] maps every project file path to its current content (or null to
+  /// [files] maps every project file path to its current raw bytes (or null to
   /// delete it). The tree is built fresh from these entries so the pushed
-  /// snapshot exactly matches the on-device workspace.
+  /// snapshot exactly matches the on-device workspace, including binaries.
   Future<({String sha, String htmlUrl})> commitTree({
     required GitHubRepo repo,
     required String branch,
     required String message,
-    required Map<String, String?> files,
+      required Map<String, List<int>?> files,
   }) async {
     final headers = await _auth()
       ..['Content-Type'] = 'application/json';
