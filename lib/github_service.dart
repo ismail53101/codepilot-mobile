@@ -183,6 +183,7 @@ GitHubRepo? githubRepoFromZipballLayout(List<String> rootEntryNames,
 
 /// GitHub REST integration. The token is kept in Android secure storage.
 class GitHubService {
+  static const _publishRequestTimeout = Duration(seconds: 30);
   final SettingsStore store;
   GitHubService(this.store);
 
@@ -390,9 +391,11 @@ class GitHubService {
   /// [GitHubException] when the API is unreachable or the repo is gone.
   Future<GitHubRepo> fetchRepoDetails(GitHubRepo repo) async {
     final headers = await _auth();
-    final response = await http.get(
-        Uri.parse('https://api.github.com/repos/${repo.owner}/${repo.name}'),
-        headers: headers);
+    final response = await http
+        .get(
+            Uri.parse('https://api.github.com/repos/${repo.owner}/${repo.name}'),
+            headers: headers)
+        .timeout(_publishRequestTimeout);
     if (response.statusCode != 200) throw GitHubException(_error(response));
     return GitHubRepo.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
   }
@@ -501,15 +504,17 @@ class GitHubService {
   /// Create a blob for [content] and return its sha.
   Future<String> _createBlob(
       GitHubRepo repo, String content, Map<String, String> headers) async {
-    final response = await http.post(
-      Uri.parse(
-          'https://api.github.com/repos/${repo.owner}/${repo.name}/git/blobs'),
-      headers: headers,
-      body: jsonEncode({
-        'content': base64Encode(utf8.encode(content)),
-        'encoding': 'base64',
-      }),
-    );
+    final response = await http
+        .post(
+          Uri.parse(
+              'https://api.github.com/repos/${repo.owner}/${repo.name}/git/blobs'),
+          headers: headers,
+          body: jsonEncode({
+            'content': base64Encode(utf8.encode(content)),
+            'encoding': 'base64',
+          }),
+        )
+        .timeout(_publishRequestTimeout);
     if (response.statusCode != 201) throw GitHubException(_error(response));
     return (jsonDecode(response.body) as Map)['sha'] as String;
   }
@@ -529,20 +534,24 @@ class GitHubService {
       ..['Content-Type'] = 'application/json';
 
     // 1. Base commit + its tree.
-    final headResp = await http.get(
-        Uri.parse(
-            'https://api.github.com/repos/${repo.owner}/${repo.name}/git/ref/heads/${Uri.encodeComponent(branch)}'),
-        headers: headers);
+    final headResp = await http
+        .get(
+            Uri.parse(
+                'https://api.github.com/repos/${repo.owner}/${repo.name}/git/ref/heads/${Uri.encodeComponent(branch)}'),
+            headers: headers)
+        .timeout(_publishRequestTimeout);
     if (headResp.statusCode != 200) {
       throw GitHubException(
           'Branch "$branch" not found on ${repo.fullName}. Create it first (create_branch).');
     }
     final baseSha =
         ((jsonDecode(headResp.body) as Map)['object'] as Map)['sha'] as String;
-    final baseCommitResp = await http.get(
-        Uri.parse(
-            'https://api.github.com/repos/${repo.owner}/${repo.name}/git/commits/$baseSha'),
-        headers: headers);
+    final baseCommitResp = await http
+        .get(
+            Uri.parse(
+                'https://api.github.com/repos/${repo.owner}/${repo.name}/git/commits/$baseSha'),
+            headers: headers)
+        .timeout(_publishRequestTimeout);
     if (baseCommitResp.statusCode != 200) throw GitHubException(_error(baseCommitResp));
     final baseTree = (jsonDecode(baseCommitResp.body) as Map)['tree']['sha'] as String;
 
@@ -570,33 +579,39 @@ class GitHubService {
         });
       }
     }
-    final treeResp = await http.post(
-      Uri.parse(
-          'https://api.github.com/repos/${repo.owner}/${repo.name}/git/trees'),
-      headers: headers,
-      body: jsonEncode({'base_tree': baseTree, 'tree': treeEntries}),
-    );
+    final treeResp = await http
+        .post(
+          Uri.parse(
+              'https://api.github.com/repos/${repo.owner}/${repo.name}/git/trees'),
+          headers: headers,
+          body: jsonEncode({'base_tree': baseTree, 'tree': treeEntries}),
+        )
+        .timeout(_publishRequestTimeout);
     if (treeResp.statusCode != 201) throw GitHubException(_error(treeResp));
     final newTree = (jsonDecode(treeResp.body) as Map)['sha'] as String;
 
     // 3. Commit object with the new tree.
-    final commitResp = await http.post(
-      Uri.parse(
-          'https://api.github.com/repos/${repo.owner}/${repo.name}/git/commits'),
-      headers: headers,
-      body: jsonEncode({'message': message, 'tree': newTree, 'parents': [baseSha]}),
-    );
+    final commitResp = await http
+        .post(
+          Uri.parse(
+              'https://api.github.com/repos/${repo.owner}/${repo.name}/git/commits'),
+          headers: headers,
+          body: jsonEncode({'message': message, 'tree': newTree, 'parents': [baseSha]}),
+        )
+        .timeout(_publishRequestTimeout);
     if (commitResp.statusCode != 201) throw GitHubException(_error(commitResp));
     final commit = jsonDecode(commitResp.body) as Map;
     final commitSha = commit['sha'] as String;
 
     // 4. Move the branch ref to the new commit.
-    final refResp = await http.patch(
-      Uri.parse(
-          'https://api.github.com/repos/${repo.owner}/${repo.name}/git/refs/heads/${Uri.encodeComponent(branch)}'),
-      headers: headers,
-      body: jsonEncode({'sha': commitSha, 'force': false}),
-    );
+    final refResp = await http
+        .patch(
+          Uri.parse(
+              'https://api.github.com/repos/${repo.owner}/${repo.name}/git/refs/heads/${Uri.encodeComponent(branch)}'),
+          headers: headers,
+          body: jsonEncode({'sha': commitSha, 'force': false}),
+        )
+        .timeout(_publishRequestTimeout);
     if (refResp.statusCode != 200) throw GitHubException(_error(refResp));
 
     return (

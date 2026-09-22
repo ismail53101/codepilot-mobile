@@ -1272,43 +1272,42 @@ class _ChatScreenState extends State<ChatScreen>
   }
 
   Future<void> _publishToGitHub() async {
-    final repo = await _resolveConnectedRepo();
-    if (repo == null) {
-      // Only reached when EVERY source confirms no repository context:
-      // no saved metadata AND no recoverable imported-repo layout in the
-      // open project. One honest error — never a card per retry.
-      _push('system',
-          'Connect and import a GitHub repository first from Integrations → GitHub.',
-          isError: true);
-      return;
-    }
-    if (projectService.projectName == null) {
-      _push('system', 'Open a project first — there is nothing to publish.',
-          isError: true);
-      return;
-    }
-
-    // What has ACTUALLY changed on disk relative to the import baseline —
-    // this includes agent-applied edits and chat-confirmed changes alike.
-    List<GitFileChange> changes;
-    try {
-      changes = await projectService.changedFilesSinceBaseline();
-    } catch (e) {
-      _push('system', 'Could not inspect project changes: $e', isError: true);
-      return;
-    }
-    if (changes.isEmpty) {
-      _push('system',
-          'No confirmed changes to publish — the project matches its last '
-          'imported/committed state. Ask the agent to modify a file first.');
-      return;
-    }
-
+    if (_publishing) return;
+    if (!mounted) return;
+    // Set this before the first await so a tap always produces immediate
+    // toolbar feedback, even while repository metadata is being resolved.
     setState(() => _publishing = true);
-    _push('system',
-        'Publishing ${changes.length} changed file${changes.length == 1 ? '' : 's'} '
-        'to ${repo.fullName}…');
+    _push('system', 'Checking project changes and GitHub repository…');
+
     try {
+      final repo = await _resolveConnectedRepo();
+      if (repo == null) {
+        // Only reached when EVERY source confirms no repository context:
+        // no saved metadata AND no recoverable imported-repo layout in the
+        // open project. One honest error — never a silent return.
+        _push('system',
+            'Connect and import a GitHub repository first from Integrations → GitHub.',
+            isError: true);
+        return;
+      }
+      if (projectService.projectName == null) {
+        _push('system', 'Open a project first — there is nothing to publish.',
+            isError: true);
+        return;
+      }
+
+      // What has ACTUALLY changed on disk relative to the import baseline —
+      // this includes agent-applied edits and chat-confirmed changes alike.
+      final changes = await projectService.changedFilesSinceBaseline();
+      if (changes.isEmpty) {
+        _push('system', 'Everything up-to-date — no changes to push.');
+        return;
+      }
+
+      _push('system',
+          'Publishing ${changes.length} changed file${changes.length == 1 ? '' : 's'} '
+          'to ${repo.fullName}…');
+
       // A REAL tree commit on GitHub with the full workspace snapshot.
       final result = await githubService.commitTree(
         repo: repo,
@@ -1327,6 +1326,11 @@ class _ChatScreenState extends State<ChatScreen>
       _push('system',
           '✓ Published to ${repo.fullName} — commit '
           '${result.sha.substring(0, 8)}\n${result.htmlUrl}');
+    } on TimeoutException {
+      if (!mounted) return;
+      _push('system',
+          'Publish FAILED — GitHub request timed out. Check the network and try again.',
+          isError: true);
     } on GitHubException catch (e) {
       if (!mounted) return;
       // Honest failure: the commit did NOT happen.
@@ -1341,11 +1345,6 @@ class _ChatScreenState extends State<ChatScreen>
     }
   }
 
-  /// CANONICAL repository resolution — delegated to
-  /// [GitHubProjectStore.resolveForActiveProject]: the project's own manifest
-  /// link, then the integration-level repository (synced INTO the project),
-  /// then recovery from the imported zipball layout. Null only when every
-  /// source confirms no repository context.
   Future<GitHubRepo?> _resolveConnectedRepo() =>
       githubProjectStore.resolveForActiveProject();
 
