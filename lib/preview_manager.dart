@@ -176,9 +176,11 @@ String? _findHtmlEntry(Directory root, String rootPath) {
   return null;
 }
 
-/// Detection against the currently open project.
+/// Detection against the currently open project. Uses the canonical
+/// [ProjectService.contentRoot] so a legacy zipball-wrapped import previews
+/// its real files (index.html), not the wrapper folder.
 PreviewResolution resolvePreview() {
-  final rootPath = projectService.rootPath;
+  final rootPath = projectService.contentRootPath;
   if (rootPath == null || projectService.projectName == null) {
     return const PreviewResolution(
       supported: false,

@@ -65,29 +65,22 @@ class ToolRegistry {
       'ERROR: no project is open. Ask the user to import one first '
       '(Home → File → ZIP, or Integrations → GitHub → Import).';
 
-  /// Validate a tool-supplied path BEFORE it reaches the filesystem:
-  /// relative, no traversal, no leading repo-name folder (a real mistake
-  /// models make — they re-create the GitHub zipball's top folder inside
-  /// the project), no absolute paths.
+  /// Validate a tool-supplied path BEFORE it reaches the filesystem — now a
+  /// thin wrapper over THE canonical [ProjectService.normalizeProjectPath]:
+  ///
+  /// - relative only; absolute paths, `..` traversal → rejected;
+  /// - a leading zipball wrapper folder (`owner-repo-sha`, as search results
+  ///   inside a legacy import can carry) is STRIPPED, so search hits and
+  ///   read/patch/write targets always resolve to the same file;
+  /// - a leading segment equal to the project name is stripped only when the
+  ///   full path does not exist but the stripped one does — never clobbers a
+  ///   real folder of that name.
+  ///
+  /// Traversal protection lives in normalizeProjectPath (returns null).
   ({bool ok, String? error, String path}) _checkPath(String raw) {
-    var path = raw.trim().replaceAll('\\\\', '/');
-    if (path.isEmpty) return (ok: false, error: 'empty path', path: path);
-    if (path.startsWith('/') || RegExp(r'^[A-Za-z]:').hasMatch(path)) {
-      return (ok: false, error: 'absolute paths are not allowed', path: path);
-    }
-    final segs = path.split('/').where((s) => s.isNotEmpty && s != '.').toList();
-    if (segs.any((s) => s == '..')) {
-      return (ok: false, error: 'path traversal (..) is not allowed', path: path);
-    }
-    // Strip a leading folder named after the repo/zipball (e.g.
-    // "owner-repo-sha/lib/x.dart" when the project root IS that repo).
-    final manifestHint = projects.projectName ?? '';
-    if (segs.isNotEmpty &&
-        segs.first.contains('-') &&
-        (manifestHint.isEmpty || segs.first != manifestHint) &&
-        segs.length > 1 &&
-        (segs.first.startsWith('ismail') || segs.first.contains(RegExp(r'-[0-9a-f]{7,}$')))) {
-      path = segs.skip(1).join('/');
+    final path = projects.normalizeProjectPath(raw);
+    if (path == null) {
+      return (ok: false, error: 'invalid or escaping path', path: raw);
     }
     return (ok: true, error: null, path: path);
   }
@@ -397,7 +390,9 @@ class ToolRegistry {
         execute: (args, {cancelToken}) async {
           if (!_hasProject) return _noProject();
           final command = args['command'] as String? ?? '';
-          final cwd = projects.rootPath!;
+          // Canonical content root: commands run against the real project
+          // files, not a zipball wrapper folder.
+          final cwd = projects.contentRootPath!;
           // The cancel token kills the subprocess the moment Stop is
           // pressed or the step watchdog fires.
           final result = await terminal.run(command, cwd,
@@ -448,12 +443,6 @@ class ToolRegistry {
         },
       );
 
-  /// Collect the full workspace snapshot for a real tree commit.
-  ///
-  /// Delegates to the canonical [ProjectService.snapshotFiles] — the same
-  /// payload the publish button sends, so agent commits and manual publishes
-  /// always upload exactly what the Explorer shows.
-  Map<String, List<int>?> _snapshotFiles() => projects.snapshotFiles();
 
   /// The linked GitHub repository for the ACTIVE PROJECT — canonical
   /// resolution via [GitHubProjectStore.resolveForActiveProject].
@@ -474,8 +463,10 @@ class ToolRegistry {
   AgentTool _gitCommit() => AgentTool(
         name: 'git_commit',
         description:
-            'Create a REAL git commit on GitHub from the current workspace '
-            'snapshot. Requires a linked GitHub repository '
+            'Create a REAL git commit on GitHub containing ONLY the files '
+            'that changed since the last import/commit baseline '
+            '(A=added, M=modified, D=deleted). Refuses to create an empty '
+            'commit. Requires a linked GitHub repository '
             '(gitRepository in the manifest, set by clone/import). '
             'The commit is created via the GitHub Git Data API.',
         parameters: {
@@ -498,16 +489,40 @@ class ToolRegistry {
                 'there) and retry.';
           }
           final branch = args['branch'] as String? ?? repo.defaultBranch;
+
+          // Only commit when an ACTUAL diff exists. `changes` carries the
+          // exact paths the tree commit will touch, so "clean" here means
+          // the same thing the Explorer/git_status report.
+          final changes = await projects.changedFilesSinceBaseline();
+          if (changes.isEmpty) {
+            return 'NOTHING TO COMMIT: the working tree is clean — no file '
+                'differs from the last import/commit baseline. No commit was '
+                'created. Modify a file first (write_file / patch_file), '
+                'then commit.';
+          }
+
           final gate = approvalGate;
           if (gate != null) {
             final ok = await gate('git_commit', args);
             if (!ok) return 'DENIED: the user declined the commit.';
           }
+
+          // Diff-scoped tree: {path: bytes} for A/M files, {path: null} for
+          // D files. Raw bytes (sent base64 to GitHub) keep binaries
+          // lossless. The tree is built ON TOP of the branch head
+          // (base_tree), so untouched files keep their existing blobs — the
+          // commit never rewrites unrelated history and never force-pushes.
+          final files = <String, List<int>?>{};
+          for (final c in changes) {
+            files[c.path] =
+                c.status == 'D' ? null : projects.readFileBytes(c.path);
+          }
+
           final result = await github.commitTree(
             repo: repo,
             branch: branch,
             message: args['message'] as String? ?? 'CodeFexa update',
-            files: _snapshotFiles(),
+            files: files,
           );
           await projects.updateManifest({
             'lastCommitSha': result.sha,
@@ -515,7 +530,9 @@ class ToolRegistry {
             'gitBranch': branch,
           });
           await projects.snapshotBaseline();
-          return 'OK: commit ${result.sha.substring(0, 8)} created on $branch\n'
+          return 'OK: commit ${result.sha.substring(0, 8)} created on $branch '
+              '(${changes.length} file${changes.length == 1 ? '' : 's'}: '
+              '${changes.map((c) => '${c.status} ${c.path}').join(', ')})\n'
               '${result.htmlUrl}';
         },
       );
@@ -551,6 +568,8 @@ class ToolRegistry {
         description:
             'Push the current workspace as a new commit to the linked '
             'repository/branch (equivalent to commit-with-default-message). '
+            'Fails honestly when the commit or the ref update fails — it '
+            'never reports success without a real commit. '
             'Use git_commit with a meaningful message instead when possible.',
         parameters: {
           'type': 'object',
@@ -559,9 +578,15 @@ class ToolRegistry {
           },
           'required': ['message'],
         },
-        execute: (args, {cancelToken}) => execute('git_commit', {
-          'message': args['message'] ?? 'CodeFexa: push from mobile',
-        }),
+        execute: (args, {cancelToken}) async {
+          final result = await execute('git_commit', {
+            'message': args['message'] ?? 'CodeFexa: push from mobile',
+          });
+          if (result.startsWith('NOTHING TO COMMIT')) {
+            return 'NOTHING TO PUSH: $result';
+          }
+          return result;
+        },
       );
 
   AgentTool _createPullRequest() => AgentTool(

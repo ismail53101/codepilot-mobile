@@ -10,6 +10,7 @@ dependencies:
   flutter:
     sdk: flutter
   archive: ^3.4.10          # ZIP import / export
+  crypto: ^3.0.3            # sha-1 content hashes for the git-change baseline
   file_picker: ^8.0.3       # pick ZIP from Android storage
   flutter_secure_storage: ^9.2.2  # API key at rest (Keystore-backed)
   http: ^1.2.1              # OpenAI-compatible client with SSE streaming

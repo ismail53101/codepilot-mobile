@@ -1308,13 +1308,23 @@ class _ChatScreenState extends State<ChatScreen>
           'Publishing ${changes.length} changed file${changes.length == 1 ? '' : 's'} '
           'to ${repo.fullName}…');
 
-      // A REAL tree commit on GitHub with the full workspace snapshot.
+      // A REAL tree commit containing ONLY the changed files, binary-safe:
+      // {path: bytes} for added/modified, {path: null} for deleted. Content
+      // is re-read as raw bytes and sent base64 to GitHub — images, ZIPs and
+      // other binaries upload losslessly. The tree is built on the branch
+      // head's base_tree, so untouched files keep their blobs and nothing is
+      // force-pushed.
+      final files = <String, List<int>?>{};
+      for (final c in changes) {
+        files[c.path] =
+            c.status == 'D' ? null : projectService.readFileBytes(c.path);
+      }
       final result = await githubService.commitTree(
         repo: repo,
         branch: repo.defaultBranch,
         message: 'CodeFexa: publish ${changes.length} file'
             '${changes.length == 1 ? '' : 's'} from mobile',
-        files: projectService.snapshotFiles(),
+        files: files,
       );
       await projectService.updateManifest({
         'lastCommitSha': result.sha,

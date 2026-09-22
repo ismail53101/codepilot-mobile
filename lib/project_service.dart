@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:archive/archive_io.dart';
+import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart' show Icons, IconData;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
@@ -37,6 +38,104 @@ class ProjectService {
     } on FileSystemException {
       return const [];
     }
+  }
+
+  // ---------------- canonical root & path normalization ----------------
+
+  static final _shaRe = RegExp(r'^[0-9a-f]{7,40}$');
+
+  /// Name of the GitHub-zipball wrapper folder when this project was
+  /// imported from a zipball that keeps its single top folder
+  /// (`<owner>-<repo>-<sha>/…`) INSIDE the project root. Detected from the
+  /// actual directory layout: exactly one visible root entry whose name
+  /// looks like `something-…-<7..40 hex sha>` and which exists on disk.
+  /// Returns null for flat projects (template/created/flattened imports).
+  String? get wrapperDirName {
+    final entries = rootEntryNames;
+    if (entries.length != 1) return null;
+    final name = entries.single;
+    final parts = name.split('-');
+    if (parts.length < 3) return null;
+    if (!_shaRe.hasMatch(parts.last)) return null;
+    final dir = Directory(p.join(root.path, name));
+    if (!dir.existsSync()) return null;
+    return name;
+  }
+
+  /// THE one directory file operations resolve against.
+  ///
+  /// For legacy zipball imports the repository files live inside the
+  /// `owner-repo-sha` wrapper folder while the project root only holds that
+  /// folder plus CodePilot's hidden markers. Every reader (Explorer, search,
+  /// agent tools, preview, publish snapshot) must use the same content root
+  /// so `search_code` results and `read_file`/`patch_file` targets always
+  /// agree, and so published paths match the repository layout on GitHub
+  /// (bare `lib/x.dart`, never `owner-repo-sha/lib/x.dart`).
+  Directory get contentRoot {
+    final wrapper = wrapperDirName;
+    if (wrapper != null) return Directory(p.join(root.path, wrapper));
+    return root;
+  }
+
+  /// Absolute path of [contentRoot]; null when no project is open.
+  String? get contentRootPath => _root == null ? null : contentRoot.path;
+
+  bool _existsInContentRoot(String rel) {
+    if (rel.isEmpty) return false;
+    final f = File(p.join(contentRoot.path, rel));
+    if (f.existsSync()) return true;
+    return Directory(p.join(contentRoot.path, rel)).existsSync();
+  }
+
+  /// THE canonical repository-relative path normalization. Every tool
+  /// argument, search hit, manifest entry and snapshot key goes through
+  /// this — one function, one behavior:
+  ///
+  /// - backslashes → forward slashes, `.` segments dropped, no empty segs;
+  /// - absolute paths and `..` traversal are REJECTED (returns null) —
+  ///   nothing can escape the project root;
+  /// - a leading segment equal to the detected zipball wrapper folder
+  ///   (`owner-repo-sha`) is stripped, so BOTH the search-result form
+  ///   (`owner-repo-sha/lib/x.dart`) and the bare form (`lib/x.dart`)
+  ///   normalize to the same repository-relative path;
+  /// - a leading segment equal to the project name is stripped ONLY when
+  ///   the full path does not exist but the stripped one does
+  ///   (existence-verified, so a real folder of that name is never clobbered).
+  ///
+  /// Returns null when [raw] is empty/invalid.
+  String? normalizeProjectPath(String raw) {
+    var path = raw.trim().replaceAll('\\', '/');
+    if (path.isEmpty) return null;
+    if (path.startsWith('/') || RegExp(r'^[A-Za-z]:').hasMatch(path)) {
+      return null;
+    }
+    final segs =
+        path.split('/').where((s) => s.isNotEmpty && s != '.').toList();
+    if (segs.any((s) => s == '..')) return null;
+
+    final wrapper = wrapperDirName;
+    if (wrapper != null && segs.isNotEmpty && segs.first == wrapper) {
+      segs.removeAt(0);
+    }
+    // Existence-verified project-name prefix (e.g. "my-app/lib/x.dart" in a
+    // project literally named my-app) — strip only when the project has NO
+    // real top-level folder of that name AND the stripped path is the only
+    // one that resolves to a real file. A genuine folder named like the
+    // project is never clobbered.
+    final projectName = _projectName;
+    if (projectName != null &&
+        projectName.isNotEmpty &&
+        segs.length > 1 &&
+        segs.first == projectName &&
+        !Directory(p.join(contentRoot.path, projectName)).existsSync()) {
+      final full = segs.join('/');
+      final stripped = segs.skip(1).join('/');
+      if (!_existsInContentRoot(full) && _existsInContentRoot(stripped)) {
+        segs.removeAt(0);
+      }
+    }
+    if (segs.isEmpty) return null; // the wrapper/name folder itself
+    return segs.join('/');
   }
 
   // ---------------- last-project persistence ----------------
@@ -93,8 +192,11 @@ class ProjectService {
     f.writeAsStringSync(jsonEncode(current), flush: true);
   }
 
-  /// Record one file change in the manifest's changed-file list.
-  Future<void> recordChangeInManifest(String path, String kind) async {
+  /// Record one file change in the manifest's changed-file list. The path
+  /// is normalized FIRST so manifest entries, search hits and the publish
+  /// diff all speak the same repository-relative language.
+  Future<void> recordChangeInManifest(String rawPath, String kind) async {
+    final path = normalizeProjectPath(rawPath) ?? rawPath;
     final m = await loadManifest();
     final changed = List<Map<String, dynamic>>.from(
         (m['changedFiles'] as List?)?.whereType<Map>().map(Map<String, dynamic>.from) ?? const []);
@@ -120,6 +222,33 @@ class ProjectService {
     return files;
   }
 
+  /// The ACTUAL GitHub tree payload: repository-relative paths + contents
+  /// (null = delete) for every file under the canonical [contentRoot],
+  /// excluding CodePilot's own metadata. The agent's git_commit and the
+  /// publish button both send THIS map, so a commit contains exactly the
+  /// files the Explorer shows — with no wrapper-folder prefixes and no
+  /// unrelated files that never changed.
+  Map<String, String?> repositorySnapshot() {
+    final files = <String, String?>{};
+    final base = contentRoot;
+    void walk(Directory dir) {
+      for (final e in dir.listSync()) {
+        final name = p.basename(e.path);
+        if (e is Directory) {
+          if (_skipDirs.contains(name)) continue;
+          walk(e);
+        } else if (e is File) {
+          if (name.startsWith('.codepilot_')) continue;
+          final rel = p.relative(e.path, from: base.path).replaceAll('\\', '/');
+          files[rel] = readFile(rel);
+        }
+      }
+    }
+
+    walk(base);
+    return files;
+  }
+
   /// Record the linked GitHub repository in the project manifest so every
   /// consumer (agent git tools, publish button, git_status) reads the SAME
   /// canonical link. Called on GitHub import and automatically when a
@@ -131,20 +260,67 @@ class ProjectService {
 
   /// Compare working tree against the manifest's baseline hashes to produce
   /// a real git-status-like report (M = content differs, A = new, D = deleted).
+  ///
+  /// Scoped to the canonical [contentRoot] and keyed by repository-relative
+  /// paths (wrapper-folder prefixes flattened) so a zipball import reports
+  /// `M lib/main.dart` — exactly what the GitHub commit will contain.
+  /// Legacy baselines recorded under `owner-repo-sha/…` keys are migrated
+  /// by dropping the prefix instead of being reported as A+D noise.
+  /// Legacy zipball baselines that include the marker files are dropped
+  /// (`A`/`D` bookkeeping noise — markers are app-internal and never part
+  /// of the repository diff).
+  ///
+  /// Hashes: sha-1 over exact file bytes (decimal), NOT `String.hashCode`.
+  /// The previous hashCode-based baseline silently broke whenever the app
+  /// process restarted (a new VM can hash differently) and after the
+  /// wrapper-flattening rename, producing false M/A/D entries — the root
+  /// cause of both "nothing changed" and "everything changed" states.
   Future<List<GitFileChange>> changedFilesSinceBaseline() async {
     final m = await loadManifest();
-    final baseline = Map<String, String>.from(m['baselineHashes'] as Map? ?? {});
+    final baseline = <String, String>{};
+    final wrapper = wrapperDirName;
+    // Migrate the stored baseline to canonical keys: marker files are
+    // dropped (app-internal, never part of the repository diff) and
+    // wrapper-prefixed legacy keys are flattened. A hash that is not a
+    // 40-hex sha-1 marks a LEGACY baseline (old per-VM `String.hashCode`,
+    // unrecoverable and meaningless after a process restart).
+    var legacyBaseline = false;
+    final raw = Map<String, String>.from(m['baselineHashes'] as Map? ?? {});
+    for (final path in raw.keys) {
+      if (path.startsWith('.codepilot_')) continue;
+      var key = path;
+      final parts = key.split('/');
+      if (wrapper != null && parts.first == wrapper) {
+        key = parts.skip(1).join('/');
+      }
+      if (!RegExp(r'^[0-9a-f]{40}$').hasMatch(raw[path]!)) {
+        legacyBaseline = true;
+      }
+      baseline[key] = raw[path]!;
+    }
+    if (legacyBaseline) {
+      // The pre-sha-1 baseline cannot be verified (hashCode values change
+      // between VM runs). Adopt the CURRENT working tree as the baseline
+      // exactly once so the migration never floods the UI with false
+      // A/M/D noise; every later diff is a real sha-1 comparison.
+      await snapshotBaseline();
+      return const [];
+    }
     final out = <GitFileChange>[];
     final seen = <String>{};
     for (final node in fileTree()) {
-      if (node.isDir || node.path == '.codepilot_manifest.json') continue;
-      seen.add(node.path);
+      if (node.isDir || node.path.startsWith('.codepilot_')) continue;
+      final norm = normalizeProjectPath(node.path) ?? node.path;
+      if (seen.contains(norm)) continue;
+      seen.add(norm);
+      // Binary-safe: hash the raw bytes (sha-1, 40 hex) instead of decoding
+      // the file as UTF-8 — images/archives participate in the diff too.
       final bytes = readFileBytes(node.path);
-      final hash = bytes == null ? '' : _bytesHash(bytes);
-      if (!baseline.containsKey(node.path)) {
-        out.add(GitFileChange(node.path, 'A'));
-      } else if (baseline[node.path] != hash) {
-        out.add(GitFileChange(node.path, 'M'));
+      final hash = bytes == null ? '' : _bytesSha1(bytes);
+      if (!baseline.containsKey(norm)) {
+        out.add(GitFileChange(norm, 'A'));
+      } else if (baseline[norm] != hash) {
+        out.add(GitFileChange(norm, 'M'));
       }
     }
     for (final path in baseline.keys) {
@@ -153,13 +329,24 @@ class ProjectService {
     return out;
   }
 
+  /// Stable content hash for baseline comparison: sha-1 of the exact file
+  /// bytes, hex-encoded (40 chars) — the same value on every device and
+  /// after every process restart (unlike `String.hashCode`), and identical
+  /// for text and binary files alike (nothing is decoded as UTF-8).
+  String _bytesSha1(List<int> bytes) => sha1.convert(bytes).toString();
+
   /// Snapshot current file hashes as the new baseline (after a commit).
+  /// Keys are canonical repository-relative paths scoped to [contentRoot];
+  /// marker files are excluded. Legacy wrapper-prefixed/marker entries are
+  /// replaced, not merged, so the diff stays clean on the next check.
   Future<void> snapshotBaseline() async {
     final hashes = <String, String>{};
     for (final node in fileTree()) {
-      if (node.isDir || node.path == '.codepilot_manifest.json') continue;
+      if (node.isDir || node.path.startsWith('.codepilot_')) continue;
+      final norm = normalizeProjectPath(node.path);
+      if (norm == null) continue; // the wrapper/name folder itself
       final bytes = readFileBytes(node.path);
-      if (bytes != null) hashes[node.path] = _bytesHash(bytes);
+      if (bytes != null) hashes[norm] = _bytesSha1(bytes);
     }
     await updateManifest({'baselineHashes': hashes});
   }
@@ -206,9 +393,32 @@ class ProjectService {
     }
     root.createSync(recursive: true);
 
+    // GitHub-zipball shape: exactly one top folder named like
+    // `owner-repo-sha` (ends in a 7–40 hex git sha). Its CONTENT becomes the
+    // project root — the wrapper folder itself is dropped so repository
+    // paths (lib/main.dart) are real paths from the first import. This
+    // removes the whole class of path bugs where search results carried a
+    // clone-prefix that read_file/patch_file could not resolve.
+    final topNames = top.toList();
+    var stripPrefix = '';
+    if (topNames.length == 1) {
+      final parts = topNames.single.split('-');
+      if (parts.length >= 3 && _shaRe.hasMatch(parts.last)) {
+        stripPrefix = '${topNames.single}/';
+      }
+    }
+
     var count = 0;
     for (final f in archive) {
-      final safe = _safeJoin(root.path, f.name);
+      if (stripPrefix.isNotEmpty) {
+        if (!f.name.startsWith(stripPrefix) || f.name == topNames.single) {
+          continue; // the wrapper folder entry itself (or foreign entry)
+        }
+      }
+      final entryName =
+          stripPrefix.isEmpty ? f.name : f.name.substring(stripPrefix.length);
+      if (entryName.isEmpty) continue;
+      final safe = _safeJoin(root.path, entryName);
       if (safe == null) continue; // zip-slip guard
       if (f.isFile) {
         final out = File(safe);
@@ -334,14 +544,17 @@ class ProjectService {
     return r;
   }
 
-  /// Resolve a relative path INSIDE the project; blocks ../ and absolute paths.
+  /// Resolve a repository-relative path INSIDE the canonical project
+  /// content; blocks ../ and absolute paths. Accepts raw tool arguments —
+  /// including the wrapper-folder form (`owner-repo-sha/lib/x.dart`) — by
+  /// normalizing FIRST, so one path language works everywhere.
   File resolveFile(String rel) {
-    final normalized = p.normalize(rel);
-    if (p.isAbsolute(normalized) || normalized.startsWith('..')) {
+    final normalized = normalizeProjectPath(rel);
+    if (normalized == null) {
       throw ProjectException('Path outside the project is not allowed: $rel');
     }
-    final f = File(p.join(root.path, normalized));
-    final rootPath = p.normalize(root.path);
+    final f = File(p.join(contentRoot.path, normalized));
+    final rootPath = p.normalize(contentRoot.path);
     final filePath = p.normalize(f.path);
     if (!p.isWithin(rootPath, filePath)) {
       throw ProjectException('Path outside the project is not allowed: $rel');
@@ -349,10 +562,11 @@ class ProjectService {
     return f;
   }
 
-  /// Full recursive file tree (files + dirs), relative paths, sorted.
+  /// Full recursive file tree (files + dirs), repository-relative paths
+  /// (wrapper-folder prefixes flattened), sorted.
   List<FileNode> fileTree() {
     final nodes = <FileNode>[];
-    final rootPath = root.path;
+    final rootPath = contentRoot.path;
     void walk(Directory d) {
       for (final e in d.listSync()) {
         final rel = p.relative(e.path, from: rootPath).replaceAll('\\', '/');
@@ -367,7 +581,7 @@ class ProjectService {
       }
     }
 
-    walk(root);
+    walk(contentRoot);
     nodes.sort((a, b) {
       if (a.isDir != b.isDir) return a.isDir ? -1 : 1;
       return a.path.toLowerCase().compareTo(b.path.toLowerCase());
@@ -398,10 +612,6 @@ class ProjectService {
     if (_looksBinary(bytes) || !_isValidUtf8(bytes)) return null;
     return utf8.decode(bytes);
   }
-
-  String _bytesHash(List<int> bytes) =>
-      bytes.fold<int>(bytes.length, (hash, byte) =>
-          ((hash * 31) ^ byte) & 0x7fffffff).toRadixString(36);
 
   bool _looksBinary(List<int> bytes) {
     // NUL and other control bytes are not valid project source text. This
@@ -485,22 +695,26 @@ class ProjectService {
     }
     dst.parent.createSync(recursive: true);
     final moved = src.renameSync(dst.path); // rename works for dirs too
-    return p.relative(moved.path, from: root.path).replaceAll('\\', '/');
+    return p.relative(moved.path, from: contentRoot.path).replaceAll('\\', '/');
   }
 
-  /// Direct children (one level) of a directory, relative paths.
+  /// Direct children (one level) of a directory, repository-relative paths.
   List<FileNode> listDir(String rel) {
-    final dir = Directory(p.join(root.path, p.normalize(rel)));
-    final rootPath = p.normalize(root.path);
+    final normalized = normalizeProjectPath(rel);
+    if (normalized == null) {
+      throw ProjectException('Path outside the project is not allowed: $rel');
+    }
+    final dir = Directory(p.join(contentRoot.path, normalized));
+    final rootPath = p.normalize(contentRoot.path);
     if (!p.isWithin(rootPath, p.normalize(dir.path))) {
       throw ProjectException('Path outside the project is not allowed: $rel');
     }
     if (!dir.existsSync()) {
-      throw ProjectException('Directory not found: $rel');
+      throw ProjectException('Directory not found: $normalized');
     }
     final out = <FileNode>[];
     for (final e in dir.listSync()) {
-      final r = p.relative(e.path, from: root.path).replaceAll('\\', '/');
+      final r = p.relative(e.path, from: contentRoot.path).replaceAll('\\', '/');
       if (r.split('/').any(_skipDirs.contains)) continue;
       if (e is Directory) {
         out.add(FileNode(path: r, isDir: true));
@@ -566,6 +780,9 @@ class ProjectService {
     };
 
     final archive = Archive();
+    // Export the CANONICAL content: for a legacy zipball-wrapped import the
+    // wrapper folder is skipped so the exported ZIP mirrors the repository.
+    final contentDir = contentRoot;
     void addDir(Directory dir, String prefix) {
       for (final entity in dir.listSync(recursive: false)) {
         final name = p.basename(entity.path);
@@ -583,7 +800,7 @@ class ProjectService {
       }
     }
 
-    addDir(rootDir, '');
+    addDir(contentDir, '');
     return ZipEncoder().encode(archive)!;
   }
 
@@ -598,8 +815,10 @@ class ProjectService {
   }
 
   /// Project type guess from marker files (for build screen + context).
+  /// Checked against the canonical [contentRoot] so a legacy zipball-wrapped
+  /// import is detected correctly.
   String detectType() {
-    final has = (String f) => File(p.join(root.path, f)).existsSync();
+    final has = (String f) => File(p.join(contentRoot.path, f)).existsSync();
     if (has('pubspec.yaml')) return 'Flutter';
     if (has('build.gradle') || has('build.gradle.kts')) return 'Android';
     if (has('package.json')) {
