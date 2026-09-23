@@ -38,11 +38,22 @@ class PreviewPlan {
   /// Non-null when nothing runnable is possible; the UI shows this reason.
   final String? blocker;
 
+  /// UI label for the two clearly separated preview paths:
+  /// "Local Preview" (runs on-device right now) vs "GitHub Build Preview"
+  /// (real compilation on GitHub Actions). Never interchanged.
+  final String label;
+
+  /// True when this outcome needs a linked GitHub repository; the UI offers
+  /// "Connect GitHub" instead of a dead Preview button.
+  final bool requiresRepo;
+
   const PreviewPlan({
     required this.projectType,
     required this.outcome,
     required this.summary,
     this.blocker,
+    this.label = 'GitHub Build Preview',
+    this.requiresRepo = false,
   });
 }
 
@@ -56,23 +67,45 @@ enum PreviewOutcome {
   /// Real remote execution with logs (server apps / CLI), no visual preview.
   runOutput,
 
-  /// On-device WebView preview of the project files themselves.
+  /// On-device WebView preview of the project's source files themselves
+  /// (plain HTML/CSS/JS projects).
   liveLocal,
+
+  /// On-device WebView preview of ALREADY-BUILT static output shipped in
+  /// the project (dist/ for Vite, out/ for Next.js, build/web for Flutter
+  /// web). No toolchain, no GitHub — the compiled artifacts exist locally.
+  localStatic,
 
   /// Nothing runnable — the honest blocker is shown.
   unavailable,
 }
 
 /// Decide the pipeline for a detected project type. Pure and testable.
-PreviewPlan planForProjectType(String detectedType, {required bool hasRepo}) {
+/// [hasPrebuiltOutput] marks projects that ALREADY contain compiled static
+/// artifacts (dist/, out/, build/web) — those preview locally without any
+/// toolchain or GitHub connection.
+PreviewPlan planForProjectType(String detectedType,
+    {required bool hasRepo, bool hasPrebuiltOutput = false}) {
   switch (detectedType) {
     case 'HTML/CSS/JS':
       return const PreviewPlan(
         projectType: 'HTML/CSS/JS',
         outcome: PreviewOutcome.liveLocal,
         summary: 'Static web project — opens directly in the on-device viewer.',
+        label: 'Local Preview',
       );
     case 'Flutter':
+      if (hasPrebuiltOutput) {
+        return const PreviewPlan(
+          projectType: 'Flutter',
+          outcome: PreviewOutcome.localStatic,
+          summary:
+              'Compiled Flutter web output (build/web) exists in this '
+              'project — serving it locally. Rebuild through GitHub '
+              'Actions after code changes.',
+          label: 'Local Preview',
+        );
+      }
       if (!hasRepo) return _repoRequired('Flutter');
       return const PreviewPlan(
         projectType: 'Flutter',
@@ -81,8 +114,21 @@ PreviewPlan planForProjectType(String detectedType, {required bool hasRepo}) {
             'Flutter Web build (flutter pub get + flutter build web '
             '--release) runs on GitHub Actions, then the compiled app is '
             'served live through GitHub Pages. Needs a linked repository.',
+        label: 'GitHub Build Preview',
+        requiresRepo: true,
       );
     case 'React (Vite)':
+      if (hasPrebuiltOutput) {
+        return const PreviewPlan(
+          projectType: 'React (Vite)',
+          outcome: PreviewOutcome.localStatic,
+          summary:
+              'Prebuilt static output (dist/) exists in this project — '
+              'serving it locally. No GitHub connection needed. Rebuild '
+              'through GitHub Actions after code changes.',
+          label: 'Local Preview',
+        );
+      }
       if (!hasRepo) return _repoRequired('React (Vite)');
       return const PreviewPlan(
         projectType: 'React (Vite)',
@@ -91,8 +137,20 @@ PreviewPlan planForProjectType(String detectedType, {required bool hasRepo}) {
             'Vite build (npm ci + npm run build) runs on GitHub Actions and '
             'the compiled site is served live through GitHub Pages. Needs a '
             'linked repository.',
+        label: 'GitHub Build Preview',
+        requiresRepo: true,
       );
     case 'Next.js':
+      if (hasPrebuiltOutput) {
+        return const PreviewPlan(
+          projectType: 'Next.js',
+          outcome: PreviewOutcome.localStatic,
+          summary:
+              'Prebuilt static export (out/) exists in this project — '
+              'serving it locally. No GitHub connection needed.',
+          label: 'Local Preview',
+        );
+      }
       if (!hasRepo) return _repoRequired('Next.js');
       return const PreviewPlan(
         projectType: 'Next.js',
@@ -102,6 +160,8 @@ PreviewPlan planForProjectType(String detectedType, {required bool hasRepo}) {
             'site is served through GitHub Pages (server-only features '
             'cannot be exported — the build log will say so). Needs a '
             'linked repository.',
+        label: 'GitHub Build Preview',
+        requiresRepo: true,
       );
     case 'Android':
       if (!hasRepo) return _repoRequired('Android');
@@ -112,6 +172,8 @@ PreviewPlan planForProjectType(String detectedType, {required bool hasRepo}) {
             'An APK cannot run inside this app — the real Gradle build runs '
             'on GitHub Actions and produces a downloadable APK artifact. '
             'Needs a linked repository.',
+        label: 'Build APK',
+        requiresRepo: true,
       );
     case 'Node.js':
       if (!hasRepo) return _repoRequired('Node.js');
@@ -122,6 +184,8 @@ PreviewPlan planForProjectType(String detectedType, {required bool hasRepo}) {
             'Dependencies are installed and the entry script is smoke-run '
             'on GitHub Actions with full logs (a local HTTP port cannot be '
             'exposed into this app). Needs a linked repository.',
+        label: 'Run / Output',
+        requiresRepo: true,
       );
     case 'Python':
       if (!hasRepo) return _repoRequired('Python');
@@ -133,12 +197,15 @@ PreviewPlan planForProjectType(String detectedType, {required bool hasRepo}) {
             'really executed on GitHub Actions with full logs (the '
             'interpreter is not available on-device). Needs a linked '
             'repository.',
+        label: 'Run / Output',
+        requiresRepo: true,
       );
     default:
       return const PreviewPlan(
         projectType: 'Unknown',
         outcome: PreviewOutcome.unavailable,
         summary: 'No build system recognized.',
+        label: 'Preview',
         blocker:
             'This project type has no recognizable build system (no '
             'package.json, pubspec.yaml, build.gradle, requirements.txt '
@@ -150,18 +217,55 @@ PreviewPlan planForProjectType(String detectedType, {required bool hasRepo}) {
 PreviewPlan _repoRequired(String type) => PreviewPlan(
       projectType: type,
       outcome: PreviewOutcome.unavailable,
-      summary: '$type previews run remotely — a GitHub repository is needed.',
+      summary:
+          '$type projects need an external build environment (a real '
+          'toolchain: Flutter SDK, Node.js, Python, or Gradle). The Android '
+          'app sandbox cannot run those toolchains, so the project is '
+          'compiled on GitHub Actions instead.',
+      label: 'GitHub Build Preview',
+      requiresRepo: true,
       blocker:
-          '$type previews are built on GitHub Actions and served through '
-          'GitHub Pages — link a GitHub repository first '
-          '(Integrations → GitHub → import or connect this project).',
+          'This project requires an external build environment. The '
+          '$type toolchain cannot run on this device, so CodeFexa builds '
+          'it on GitHub Actions — connect a GitHub repository to enable '
+          'that (Connect GitHub → Build & Deploy).',
     );
 
-/// Resolves the pipeline plan for the currently open project.
+/// Resolves the pipeline plan for the currently open project. The repo
+/// lookup is cached for the UI: repo state only changes through explicit
+/// import/disconnect actions, so re-checking it on every frame would stall
+/// the Preview button behind a network round-trip.
 Future<PreviewPlan> resolvePreviewPlan() async {
   final res = resolvePreview();
-  final repo = await githubProjectStore.resolveForActiveProject();
-  return planForProjectType(res.projectType, hasRepo: repo != null);
+  final repo = await _cachedRepo();
+  return planForProjectType(
+    res.projectType,
+    hasRepo: repo != null,
+    hasPrebuiltOutput: res.hasPrebuiltOutput,
+  );
+}
+
+GitHubRepo? _repoCache;
+DateTime? _repoCacheAt;
+
+Future<GitHubRepo?> _cachedRepo() async {
+  // A fresh link usually lands on this screen right after the import UI
+  // closes; a 3-second TTL keeps that instant while still bounding staleness.
+  final now = DateTime.now();
+  if (_repoCacheAt != null && now.difference(_repoCacheAt!).inSeconds < 3) {
+    return _repoCache;
+  }
+  _repoCache = await githubProjectStore.resolveForActiveProject();
+  _repoCacheAt = now;
+  return _repoCache;
+}
+
+/// Called by the integrations/import UI after the repository link changes,
+/// so the very next Preview tap reflects reality without waiting for the
+/// TTL to expire.
+void invalidatePreviewRepoCache() {
+  _repoCache = null;
+  _repoCacheAt = null;
 }
 
 /// The workflow file name on the preview branch.
@@ -366,6 +470,7 @@ class PreviewPipeline {
 
       // 2. Dispatch the build for this project type.
       onLog('Dispatching $projectTypeInput build on GitHub Actions…');
+      invalidatePreviewRepoCache();
       await github.dispatchWorkflow(
         repo,
         'codefexa-preview.yml',

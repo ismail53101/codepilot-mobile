@@ -25,13 +25,35 @@ class PreviewResolution {
   final String? reason;
   final String? hint;
 
+  /// Prebuilt static output exists in the project (dist/, out/ or
+  /// build/web): compiled artifacts can be served locally without any
+  /// toolchain or GitHub connection.
+  final bool hasPrebuiltOutput;
+
   const PreviewResolution({
     required this.supported,
     required this.projectType,
     this.entryPath,
     this.reason,
     this.hint,
+    this.hasPrebuiltOutput = false,
   });
+}
+
+/// Prebuilt static output directories — their presence means compiled
+/// artifacts already exist and can be served locally as-is.
+const _prebuiltOutputDirs = ['dist', 'out', 'build/web'];
+
+/// True when [rootPath] contains a usable compiled static output directory
+/// (an index.html plus at least one asset, or just an index.html).
+bool hasPrebuiltStaticOutputIn(String rootPath) {
+  for (final dir in _prebuiltOutputDirs) {
+    final d = Directory(p.join(rootPath, dir));
+    if (d.existsSync() && File(p.join(d.path, 'index.html')).existsSync()) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /// Pure, testable detection over a directory.
@@ -48,6 +70,7 @@ PreviewResolution resolvePreviewInDirectory({
     );
   }
   final has = (String f) => File(p.join(rootPath, f)).existsSync();
+  final prebuilt = hasPrebuiltStaticOutputIn(rootPath);
 
   // ---- toolchain types: cannot run on-device, say why ------------------
   if (has('pubspec.yaml')) {
@@ -59,6 +82,7 @@ PreviewResolution resolvePreviewInDirectory({
           'which cannot run on the device itself.',
       hint: 'Use Build → GitHub Actions to produce a real APK, or ask the '
           'agent to verify the code statically.',
+      hasPrebuiltOutput: prebuilt,
     );
   }
   if (has('build.gradle') || has('build.gradle.kts')) {
@@ -99,6 +123,7 @@ PreviewResolution resolvePreviewInDirectory({
           'which cannot run inside the app sandbox.',
       hint: 'Push to GitHub and let the included Actions workflow build it, '
           'or preview a plain HTML version of the UI.',
+      hasPrebuiltOutput: prebuilt,
     );
   }
   if (has('requirements.txt') || has('pyproject.toml')) {
@@ -133,6 +158,7 @@ PreviewResolution resolvePreviewInDirectory({
     supported: true,
     projectType: 'HTML/CSS/JS',
     entryPath: entry,
+    hasPrebuiltOutput: prebuilt,
   );
 }
 
@@ -198,14 +224,48 @@ PreviewResolution resolvePreview() {
   );
 }
 
-/// The ▶ PREVIEW action — PROJECT-TYPE AWARE:
-/// - HTML/CSS/JS: unchanged on-device live preview (loopback + WebView).
-/// - Flutter / React (Vite) / Next.js: REAL remote build on GitHub Actions
-///   (flutter build web --release / vite build) served live via GitHub Pages.
-/// - Android: real Gradle APK build with a downloadable artifact (Build APK).
-/// - Node.js / Python: real install+run with logs (Run/Output console).
-/// - Anything without a runnable path still gets an honest reason — never a
-///   faked preview.
+/// Cached resolution for the synchronous preview-button label. Directory
+/// scans on every frame are wasteful; the cache is invalidated whenever the
+/// agent writes files (see [invalidatePreviewResolution]).
+PreviewResolution? _resolutionCache;
+
+/// Cached plan for the async preview tap. Invalidated together with the
+/// resolution and the repo cache.
+PreviewPlan? _planCache;
+
+/// Synchronous, cheap label for the preview chip. Cached between agent
+/// writes; returns 'Preview' when nothing is known yet.
+String previewChipLabel() {
+  if (projectService.projectName == null) return 'Preview';
+  _resolutionCache ??= resolvePreview();
+  final type = _resolutionCache!.projectType;
+  _planCache ??= planForProjectType(type, hasRepo: true);
+  return _planCache!.label;
+}
+
+/// The agent (or a GitHub import) changed project files/state — drop the
+/// cached detection so the next label and preview reflect reality.
+void invalidatePreviewResolution() {
+  _resolutionCache = null;
+  _planCache = null;
+}
+
+/// The ▶ PREVIEW action — PROJECT-TYPE AWARE with two clearly separated
+/// paths, honestly labeled:
+///
+/// A) LOCAL PREVIEW — no GitHub required, works immediately:
+///    - HTML/CSS/JS projects (source served over loopback + WebView).
+///    - Projects with prebuilt static output (Vite dist/, Next out/,
+///      Flutter build/web) — compiled artifacts served locally as-is.
+///
+/// B) GITHUB BUILD PREVIEW — real compilation on GitHub Actions:
+///    - Flutter → flutter build web --release → GitHub Pages.
+///    - React (Vite) / Next.js → npm build → GitHub Pages.
+///    - Android → Build APK (real Gradle artifact, no pretend preview).
+///    - Node.js / Python → Run/Output console (real install + execution).
+///
+/// GitHub is never required to create or edit a project, and never faked:
+/// without a linked repo the user gets the reason plus [Connect GitHub].
 Future<void> openProjectPreview(BuildContext context) async {
   final plan = await resolvePreviewPlan();
   if (!context.mounted) return;
@@ -226,27 +286,44 @@ Future<void> openProjectPreview(BuildContext context) async {
         );
       } else {
         // Detected as static web but no entry file found — say why.
-        await showDialog<void>(
-          context: context,
-          builder: (ctx) => AlertDialog(
-            backgroundColor: AppTheme.surface,
-            shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(16)),
-            title: Row(children: const [
-              Icon(Icons.videocam_off_outlined, size: 18, color: AppTheme.warn),
-              SizedBox(width: 8),
-              Text('Preview unavailable', style: TextStyle(fontSize: 15)),
-            ]),
-            content: Text(
-                res.reason ?? 'No HTML entry file (index.html) was found.',
-                style: const TextStyle(color: AppTheme.muted, fontSize: 12.5)),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(ctx),
-                child: const Text('Back to Project'),
-              ),
-            ],
+        await _previewDialog(
+          context,
+          title: 'Preview unavailable',
+          projectType: res.projectType,
+          body: res.reason ?? 'No HTML entry file (index.html) was found.',
+        );
+      }
+      return;
+
+    case PreviewOutcome.localStatic:
+      // Prebuilt output — serve the compiled directory locally. No GitHub,
+      // no toolchain, no faking: the artifacts genuinely exist.
+      final rootPath = projectService.contentRootPath;
+      String? serveRoot;
+      for (final dir in _prebuiltOutputDirs) {
+        final d = Directory(p.join(rootPath!, dir));
+        if (d.existsSync() && File(p.join(d.path, 'index.html')).existsSync()) {
+          serveRoot = d.path;
+          break;
+        }
+      }
+      if (serveRoot != null) {
+        await Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => PreviewScreen(
+              localRoot: serveRoot,
+              projectTitle:
+                  '${projectService.projectName} — ${plan.label}',
+            ),
           ),
+        );
+      } else {
+        await _previewDialog(
+          context,
+          title: 'Preview unavailable',
+          projectType: plan.projectType,
+          body: 'Prebuilt output was detected but could not be opened.',
         );
       }
       return;
@@ -264,41 +341,68 @@ Future<void> openProjectPreview(BuildContext context) async {
       return;
 
     case PreviewOutcome.unavailable:
-      // Honest blocker dialog (no repo linked, no build system, …).
-      await showDialog<void>(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          backgroundColor: AppTheme.surface,
-          shape:
-              RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-          title: Row(children: const [
-            Icon(Icons.videocam_off_outlined, size: 18, color: AppTheme.warn),
-            SizedBox(width: 8),
-            Text('Preview unavailable', style: TextStyle(fontSize: 15)),
-          ]),
-          content: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('Project type: ${plan.projectType}',
-                    style: const TextStyle(
-                        color: AppTheme.text,
-                        fontSize: 12.5,
-                        fontWeight: FontWeight.w600)),
-                const SizedBox(height: 6),
-                Text(plan.blocker ??
-                    'This project type cannot be previewed on-device.',
-                    style: const TextStyle(
-                        color: AppTheme.muted, fontSize: 12.5)),
-              ]),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('Back to Project'),
-            ),
-          ],
-        ),
+      // Honest blocker: WHY GitHub/an external environment is required,
+      // plus [Connect GitHub] when that is the missing piece.
+      await _previewDialog(
+        context,
+        title: 'Preview unavailable',
+        projectType: plan.projectType,
+        body: plan.blocker ??
+            'This project type cannot be previewed on-device.',
+        showConnectGitHub: plan.requiresRepo,
       );
       return;
   }
+}
+
+Future<void> _previewDialog(
+  BuildContext context, {
+  required String title,
+  required String projectType,
+  required String body,
+  bool showConnectGitHub = false,
+}) async {
+  await showDialog<void>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      backgroundColor: AppTheme.surface,
+      shape:
+          RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      title: Row(children: const [
+        Icon(Icons.videocam_off_outlined, size: 18, color: AppTheme.warn),
+        SizedBox(width: 8),
+        Text('Preview unavailable', style: TextStyle(fontSize: 15)),
+      ]),
+      content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Project type: $projectType',
+                style: const TextStyle(
+                    color: AppTheme.text,
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w600)),
+            const SizedBox(height: 6),
+            Text(body,
+                style: const TextStyle(color: AppTheme.muted, fontSize: 12.5)),
+          ]),
+      actions: [
+        if (showConnectGitHub)
+          FilledButton.icon(
+            style: FilledButton.styleFrom(
+                backgroundColor: AppTheme.glowAccent),
+            onPressed: () {
+              Navigator.pop(ctx);
+              Navigator.pushNamed(context, '/github');
+            },
+            icon: const Icon(Icons.link, size: 15),
+            label: const Text('Connect GitHub'),
+          ),
+        TextButton(
+          onPressed: () => Navigator.pop(ctx),
+          child: const Text('Back to Project'),
+        ),
+      ],
+    ),
+  );
 }

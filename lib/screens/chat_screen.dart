@@ -438,6 +438,7 @@ class _ChatScreenState extends State<ChatScreen>
           await _saveSession();
           if (_sessionId != null) _chatSessionId = _sessionId;
           await projectService.openProject(targetProject);
+          invalidatePreviewResolution();
         } on ProjectException catch (e) {
           // The remembered project may have been deleted on-device — fall
           // through to the picker so the user is never stuck.
@@ -611,6 +612,7 @@ class _ChatScreenState extends State<ChatScreen>
         if (selected.isProject && selected.projectId != null) {
       try {
         await projectService.openProject(selected.projectId!);
+        invalidatePreviewResolution();
         _lastProjectId = selected.projectId;
         _invalidateProjectSlotIfChanged(selected.projectId);
       } catch (_) {
@@ -1256,6 +1258,9 @@ class _ChatScreenState extends State<ChatScreen>
       });
       if (o.state == AgentTaskState.completed) {
         _push('assistant', o.message);
+        // The agent may have created/removed entry files or build output —
+        // the preview chip must re-detect the project on next use.
+        invalidatePreviewResolution();
       } else if (o.state == AgentTaskState.failed) {
         _push('system', '✕ Task failed — ${o.message}', isError: true);
       } else if (o.state == AgentTaskState.cancelled) {
@@ -1825,14 +1830,14 @@ class _ChatScreenState extends State<ChatScreen>
                   InkWell(
                     borderRadius: BorderRadius.circular(10),
                     onTap: () => openProjectPreview(context),
-                    child: const Padding(
-                      padding: EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
                       child: Row(mainAxisSize: MainAxisSize.min, children: [
-                        Icon(Icons.play_circle_outline,
+                        const Icon(Icons.play_circle_outline,
                             size: 14, color: AppTheme.muted),
-                        SizedBox(width: 4),
-                        Text('Preview',
-                            style: TextStyle(
+                        const SizedBox(width: 4),
+                        Text(previewChipLabel(),
+                            style: const TextStyle(
                                 fontSize: 11, color: AppTheme.muted)),
                       ]),
                     ),

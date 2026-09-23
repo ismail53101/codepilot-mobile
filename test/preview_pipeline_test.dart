@@ -1,5 +1,9 @@
-import 'package:flutter_test/flutter_test.dart';
+import 'dart:io';
 
+import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as p;
+
+import 'package:codepilot_mobile/preview_manager.dart';
 import 'package:codepilot_mobile/preview_pipeline.dart';
 
 void main() {
@@ -55,6 +59,158 @@ void main() {
       final plan = planForProjectType('Unknown', hasRepo: true);
       expect(plan.outcome, PreviewOutcome.unavailable);
       expect(plan.blocker, isNotNull);
+    });
+  });
+
+  group('NO-GITHUB / LOCAL PREVIEW MODE (requirements 10–12)', () {
+    test('prebuilt Vite dist/ routes to a local preview without GitHub', () {
+      final plan =
+          planForProjectType('React (Vite)', hasRepo: false, hasPrebuiltOutput: true);
+      expect(plan.outcome, PreviewOutcome.localStatic);
+      expect(plan.label, 'Local Preview');
+      expect(plan.requiresRepo, isFalse);
+      expect(plan.blocker, isNull);
+    });
+
+    test('prebuilt Next.js out/ routes to a local preview without GitHub', () {
+      final plan =
+          planForProjectType('Next.js', hasRepo: false, hasPrebuiltOutput: true);
+      expect(plan.outcome, PreviewOutcome.localStatic);
+      expect(plan.label, 'Local Preview');
+    });
+
+    test('prebuilt Flutter build/web routes to a local preview without GitHub',
+        () {
+      final plan =
+          planForProjectType('Flutter', hasRepo: false, hasPrebuiltOutput: true);
+      expect(plan.outcome, PreviewOutcome.localStatic);
+      expect(plan.label, 'Local Preview');
+    });
+
+    test('source-only Vite project without repo still explains GitHub need',
+        () {
+      final plan =
+          planForProjectType('React (Vite)', hasRepo: false);
+      expect(plan.outcome, PreviewOutcome.unavailable);
+      expect(plan.requiresRepo, isTrue);
+      expect(plan.blocker, contains('external build environment'));
+      expect(plan.blocker, contains('Connect GitHub'));
+    });
+
+    test('every plan carries an honest path label', () {
+      expect(planForProjectType('HTML/CSS/JS', hasRepo: true).label,
+          'Local Preview');
+      expect(planForProjectType('Flutter', hasRepo: true).label,
+          'GitHub Build Preview');
+      expect(planForProjectType('React (Vite)', hasRepo: true).label,
+          'GitHub Build Preview');
+      expect(planForProjectType('Next.js', hasRepo: true).label,
+          'GitHub Build Preview');
+      expect(planForProjectType('Android', hasRepo: true).label, 'Build APK');
+      expect(planForProjectType('Node.js', hasRepo: true).label, 'Run / Output');
+      expect(planForProjectType('Python', hasRepo: true).label, 'Run / Output');
+    });
+
+    test('only GitHub-build outcomes declare requiresRepo', () {
+      for (final t in const [
+        'Flutter',
+        'React (Vite)',
+        'Next.js',
+        'Android',
+        'Node.js',
+        'Python'
+      ]) {
+        expect(planForProjectType(t, hasRepo: true).requiresRepo, isTrue,
+            reason: t);
+      }
+      expect(
+          planForProjectType('HTML/CSS/JS', hasRepo: true).requiresRepo, isFalse);
+      expect(
+          planForProjectType('React (Vite)', hasRepo: false,
+                  hasPrebuiltOutput: true)
+              .requiresRepo,
+          isFalse);
+    });
+  });
+
+  group('hasPrebuiltStaticOutputIn — compiled-artifact detection', () {
+    late Directory tmp;
+
+    setUp(() {
+      tmp = Directory.systemTemp.createTempSync('prebuilt_test');
+    });
+
+    tearDown(() {
+      tmp.deleteSync(recursive: true);
+    });
+
+    test('detects dist/index.html (Vite build output)', () {
+      Directory(p.join(tmp.path, 'dist')).createSync(recursive: true);
+      File(p.join(tmp.path, 'dist', 'index.html')).writeAsStringSync('<html></html>');
+      expect(hasPrebuiltStaticOutputIn(tmp.path), isTrue);
+    });
+
+    test('detects out/index.html (Next.js export)', () {
+      Directory(p.join(tmp.path, 'out')).createSync(recursive: true);
+      File(p.join(tmp.path, 'out', 'index.html')).writeAsStringSync('<html></html>');
+      expect(hasPrebuiltStaticOutputIn(tmp.path), isTrue);
+    });
+
+    test('detects build/web/index.html (Flutter web build)', () {
+      Directory(p.join(tmp.path, 'build', 'web')).createSync(recursive: true);
+      File(p.join(tmp.path, 'build', 'web', 'index.html'))
+          .writeAsStringSync('<html></html>');
+      expect(hasPrebuiltStaticOutputIn(tmp.path), isTrue);
+    });
+
+    test('an empty dist/ without index.html does NOT count', () {
+      Directory(p.join(tmp.path, 'dist')).createSync(recursive: true);
+      expect(hasPrebuiltStaticOutputIn(tmp.path), isFalse);
+    });
+
+    test('source-only projects have no prebuilt output', () {
+      expect(hasPrebuiltStaticOutputIn(tmp.path), isFalse);
+    });
+  });
+
+  group('resolvePreviewInDirectory — detection through the full resolver', () {
+    late Directory tmp;
+
+    setUp(() {
+      tmp = Directory.systemTemp.createTempSync('preview_detect_test');
+    });
+
+    tearDown(() {
+      tmp.deleteSync(recursive: true);
+    });
+
+    test('static web with index.html is locally previewable', () {
+      File(p.join(tmp.path, 'index.html')).writeAsStringSync('<html></html>');
+      final res = resolvePreviewInDirectory(
+          rootPath: tmp.path, projectName: 'demo');
+      expect(res.supported, isTrue);
+      expect(res.projectType, 'HTML/CSS/JS');
+      expect(res.entryPath, 'index.html');
+    });
+
+    test('Vite project with prebuilt dist reports the artifact flag', () {
+      File(p.join(tmp.path, 'package.json')).writeAsStringSync(
+          '{"name":"demo","dependencies":{"react":"^18","vite":"^5"}}');
+      Directory(p.join(tmp.path, 'dist')).createSync(recursive: true);
+      File(p.join(tmp.path, 'dist', 'index.html')).writeAsStringSync('<html></html>');
+      final res = resolvePreviewInDirectory(
+          rootPath: tmp.path, projectName: 'demo');
+      expect(res.projectType, 'React (Vite)');
+      expect(res.hasPrebuiltOutput, isTrue);
+    });
+
+    test('Vite project without dist does not claim prebuilt output', () {
+      File(p.join(tmp.path, 'package.json')).writeAsStringSync(
+          '{"name":"demo","dependencies":{"react":"^18","vite":"^5"}}');
+      final res = resolvePreviewInDirectory(
+          rootPath: tmp.path, projectName: 'demo');
+      expect(res.projectType, 'React (Vite)');
+      expect(res.hasPrebuiltOutput, isFalse);
     });
   });
 

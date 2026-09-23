@@ -75,7 +75,9 @@ class _PreviewPipelineScreenState extends State<PreviewPipelineScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final title = 'Preview — ${widget.plan.projectType}';
+    // Honest labeling: "GitHub Build Preview", "Build APK" or "Run / Output"
+    // — never a generic "Preview" that implies something already running.
+    final title = '${widget.plan.label} — ${widget.plan.projectType}';
     return Scaffold(
       backgroundColor: AppTheme.bg,
       appBar: AppBar(title: Text(title, style: const TextStyle(fontSize: 16))),
