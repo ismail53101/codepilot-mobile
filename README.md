@@ -30,13 +30,20 @@ Build Logs · Export Project · Settings · Custom API Provider
   keys/providers on rate limits, quota, invalid keys or outages (capped at
   5 attempts); Manual mode pins one provider. The previous single-provider
   setup migrates automatically on first open.
-- **Project preview — no GitHub needed** — ▶ Preview (chat bottom bar, and
-  the completed-task card) serves the open project over a loopback HTTP
-  server and renders it in an in-app WebView: real CSS, real JavaScript,
-  relative assets, SPA fallback. Static HTML/CSS/JS projects work fully
-  offline. Flutter/Android/Node/Python/React-Next projects honestly show
-  "Preview unavailable" with the real reason and options — never a fake
-  preview. Reload, Open-in-browser and copy-URL actions included.
+- **Project preview — project-type aware** — ▶ Preview (chat bottom bar, and
+  the completed-task card) adapts to the detected project type. Static
+  HTML/CSS/JS projects serve over a loopback HTTP server into an in-app
+  WebView: real CSS, real JavaScript, relative assets, SPA fallback — fully
+  offline. Flutter projects run a REAL `flutter pub get` + `flutter build web
+  --release` on GitHub Actions and the compiled app is served live through
+  GitHub Pages (native-plugin build failures show the real log and the
+  workflow also produces a debug-APK fallback artifact). React (Vite) and
+  Next.js projects build remotely (`npm ci` + `npm run build` / `npx next
+  build`) and deploy the static output to Pages. Android projects get a real
+  Gradle APK artifact (Build APK). Node.js and Python projects are installed
+  and really executed remotely with full logs in a Run/Output console. Every
+  pipeline shows real progress and the actual GitHub Actions log; failures
+  show the real build error — nothing is faked.
 - **Chat memory** — every conversation is saved on-device (last 30) and
   resumes automatically after an app restart. Chat → 💬 lists and resumes
   previous chats, ✚ starts a new one.

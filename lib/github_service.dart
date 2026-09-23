@@ -806,6 +806,133 @@ class GitHubService {
     );
   }
 
+  /// The head commit sha of [branch] (null when the branch doesn't exist).
+  Future<String?> getHeadSha(GitHubRepo repo, String branch) async {
+    final headers = await _auth();
+    final url =
+        'https://api.github.com/repos/${repo.owner}/${repo.name}/git/ref/heads/${Uri.encodeComponent(branch)}';
+    final response = await _get(Uri.parse(url), headers);
+    if (response.statusCode == 404) return null;
+    if (response.statusCode != 200) {
+      throw GitHubException(_error(response, method: 'GET', url: url));
+    }
+    return ((jsonDecode(response.body) as Map)['object'] as Map)['sha'] as String;
+  }
+
+  /// A file's content (base64-decoded) and sha from the repo (null when the
+  /// file does not exist).
+  Future<({String content, String sha})?> getContents(
+      GitHubRepo repo, String path,
+      {String? ref}) async {
+    final headers = await _auth();
+    final refQ = ref == null ? '' : '?ref=${Uri.encodeComponent(ref)}';
+    final url =
+        'https://api.github.com/repos/${repo.owner}/${repo.name}/contents/${path.split('/').map(Uri.encodeComponent).join('/')}$refQ';
+    final response = await _get(Uri.parse(url), headers);
+    if (response.statusCode == 404) return null;
+    if (response.statusCode != 200) {
+      throw GitHubException(_error(response, method: 'GET', url: url));
+    }
+    final data = jsonDecode(response.body) as Map;
+    final b64 = data['content'] as String? ?? '';
+    final clean = b64.replaceAll('\n', '').replaceAll('\r', '');
+    return (content: utf8.decode(base64Decode(clean), allowMalformed: true),
+        sha: data['sha'] as String);
+  }
+
+  /// Trigger a `workflow_dispatch` event on [workflowFile] (e.g.
+  /// `preview.yml`) on [ref] (a branch). Returns when GitHub accepted the
+  /// dispatch (HTTP 204). Requires the token to have `actions:write` —
+  /// the OAuth `repo` scope grants it on the user's own repositories.
+  Future<void> dispatchWorkflow(GitHubRepo repo, String workflowFile,
+      {required String ref, Map<String, String>? inputs}) async {
+    final headers = await _auth()
+      ..['Content-Type'] = 'application/json';
+    final url =
+        'https://api.github.com/repos/${repo.owner}/${repo.name}/actions/workflows/${Uri.encodeComponent(workflowFile)}/dispatches';
+    final response = await _post(Uri.parse(url), headers,
+        body: jsonEncode({'ref': ref, if (inputs != null) 'inputs': inputs}),
+        timeout: const Duration(seconds: 30));
+    if (response.statusCode != 204) {
+      throw GitHubException(_error(response, method: 'POST', url: url));
+    }
+  }
+
+  /// The latest run of ONE workflow file (null when the workflow has never
+  /// run). Unlike [latestRun] this filters by workflow, not just branch —
+  /// essential for preview runs which share the repo's default branch with
+  /// the main CI.
+  Future<({String status, String? conclusion, int runId, String url})?>
+      latestWorkflowRun(GitHubRepo repo, String workflowFile,
+          {String? branch}) async {
+    final headers = await _auth();
+    final branchQ = branch == null
+        ? ''
+        : 'branch=${Uri.encodeComponent(branch)}&';
+    final url =
+        'https://api.github.com/repos/${repo.owner}/${repo.name}/actions/workflows/${Uri.encodeComponent(workflowFile)}/runs?${branchQ}per_page=1';
+    final response = await _get(Uri.parse(url), headers);
+    if (response.statusCode != 200) {
+      throw GitHubException(_error(response, method: 'GET', url: url));
+    }
+    final runs =
+        ((jsonDecode(response.body) as Map)['workflow_runs'] as List?) ?? const [];
+    if (runs.isEmpty) return null;
+    final run = runs.first as Map;
+    return (
+      status: run['status'] as String? ?? 'unknown',
+      conclusion: run['conclusion'] as String?,
+      runId: run['id'] as int,
+      url: run['html_url'] as String? ?? '',
+    );
+  }
+
+  /// The public GitHub Pages URL for [repo]'s [branch] (null when Pages is
+  /// not configured). For a project site this is
+  /// `https://<owner>.github.io/<repo>/`.
+  Future<String?> pagesUrl(GitHubRepo repo) async {
+    final headers = await _auth();
+    final url =
+        'https://api.github.com/repos/${repo.owner}/${repo.name}/pages';
+    final response = await _get(Uri.parse(url), headers);
+    if (response.statusCode == 404) return null; // Pages not enabled
+    if (response.statusCode != 200) {
+      throw GitHubException(_error(response, method: 'GET', url: url));
+    }
+    final data = jsonDecode(response.body) as Map;
+    final u = data['html_url'] as String?;
+    return (u == null || u.isEmpty) ? null : u;
+  }
+
+  /// Enable GitHub Pages on [repo] serving the `gh-pages` branch root.
+  /// Returns the site URL. 409 = already enabled (query the URL instead).
+  Future<String> ensurePagesEnabled(GitHubRepo repo) async {
+    final existing = await pagesUrl(repo);
+    if (existing != null) return existing;
+    final headers = await _auth()
+      ..['Content-Type'] = 'application/json';
+    final url =
+        'https://api.github.com/repos/${repo.owner}/${repo.name}/pages';
+    final response = await _post(Uri.parse(url), headers,
+        body: jsonEncode({
+          'source': {'branch': 'gh-pages', 'path': '/'},
+        }));
+    if (response.statusCode == 201 || response.statusCode == 204) {
+      final data = response.body.isEmpty
+          ? <String, dynamic>{}
+          : jsonDecode(response.body) as Map;
+      final u = data['html_url'] as String?;
+      if (u != null && u.isNotEmpty) return u;
+      return 'https://${repo.owner}.github.io/${repo.name}/';
+    }
+    if (response.statusCode == 409) {
+      // Already enabled but the earlier GET failed/raced — read it now.
+      final again = await pagesUrl(repo);
+      if (again != null) return again;
+    }
+    throw GitHubException(_error(response, method: 'POST', url: url));
+  }
+
   /// Open a pull request from [head] into [base].
   Future<({int number, String url})> createPullRequest(
       GitHubRepo repo, String head, String base, String title,
@@ -845,8 +972,7 @@ class GitHubService {
 
   /// Download the failed step of a CI run for error-driven repair.
   /// Returns the first ~6k chars of the failed job's log.
-  Future<String> fetchFailureLog(GitHubRepo repo, int runId) async {
-    final headers = await _auth();
+  Future<String> fetchFailureLog(GitHubRepo repo, int runId) async {    final headers = await _auth();
     final jobsUrl =
         'https://api.github.com/repos/${repo.owner}/${repo.name}/actions/runs/$runId/jobs';
     final jobsResp = await _get(Uri.parse(jobsUrl), headers,

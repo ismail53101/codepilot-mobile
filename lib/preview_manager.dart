@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 
 import 'main.dart';
+import 'preview_pipeline.dart';
+import 'screens/preview_pipeline_screen.dart';
 import 'screens/preview_screen.dart';
 import 'theme.dart';
 
@@ -196,87 +198,107 @@ PreviewResolution resolvePreview() {
   );
 }
 
-/// The ▶ PREVIEW action. Opens the live local preview when the project type
-/// supports it; otherwise shows an honest "Preview unavailable" card with
-/// the real reason and what to do instead. Works fully offline and NEVER
-/// requires GitHub.
+/// The ▶ PREVIEW action — PROJECT-TYPE AWARE:
+/// - HTML/CSS/JS: unchanged on-device live preview (loopback + WebView).
+/// - Flutter / React (Vite) / Next.js: REAL remote build on GitHub Actions
+///   (flutter build web --release / vite build) served live via GitHub Pages.
+/// - Android: real Gradle APK build with a downloadable artifact (Build APK).
+/// - Node.js / Python: real install+run with logs (Run/Output console).
+/// - Anything without a runnable path still gets an honest reason — never a
+///   faked preview.
 Future<void> openProjectPreview(BuildContext context) async {
-  var res = resolvePreview();
-  if (res.supported && res.entryPath != null) {
-    await Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => PreviewScreen(
-          path: res.entryPath,
-          projectTitle: projectService.projectName,
-        ),
-      ),
-    );
-    return;
-  }
+  final plan = await resolvePreviewPlan();
+  if (!context.mounted) return;
 
-  // Unsupported — say why and offer honest actions.
-  await showDialog<void>(
-    context: context,
-    builder: (ctx) => AlertDialog(
-      backgroundColor: AppTheme.surface,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      title: Row(children: const [
-        Icon(Icons.videocam_off_outlined, size: 18, color: AppTheme.warn),
-        SizedBox(width: 8),
-        Text('Preview unavailable',
-            style: TextStyle(fontSize: 15)),
-      ]),
-      content: Column(mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text('Project type: ${res.projectType}',
-            style: const TextStyle(
-                color: AppTheme.text, fontSize: 12.5,
-                fontWeight: FontWeight.w600)),
-        const SizedBox(height: 6),
-        Text(res.reason ?? 'This project type cannot be previewed on-device.',
-            style: const TextStyle(color: AppTheme.muted, fontSize: 12.5)),
-        if (res.hint != null) ...[
-          const SizedBox(height: 8),
-          Text(res.hint!,
-              style: const TextStyle(
-                  color: AppTheme.glowAccent, fontSize: 12)),
-        ],
-      ]),
-      actions: [
-        TextButton(
-          onPressed: () {
-            // View Error: full technical context, no faked success.
-            ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(
-              duration: const Duration(seconds: 4),
-              content: Text(
-                  'Preview resolver: type=${res.projectType}, '
-                  'entry=${res.entryPath ?? 'none'}, reason=${res.reason}'),
-            ));
-          },
-          child: const Text('View Error'),
+  switch (plan.outcome) {
+    case PreviewOutcome.liveLocal:
+      // Existing on-device path — untouched.
+      final res = resolvePreview();
+      if (res.supported && res.entryPath != null) {
+        await Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => PreviewScreen(
+              path: res.entryPath,
+              projectTitle: projectService.projectName,
+            ),
+          ),
+        );
+      } else {
+        // Detected as static web but no entry file found — say why.
+        await showDialog<void>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            backgroundColor: AppTheme.surface,
+            shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(16)),
+            title: Row(children: const [
+              Icon(Icons.videocam_off_outlined, size: 18, color: AppTheme.warn),
+              SizedBox(width: 8),
+              Text('Preview unavailable', style: TextStyle(fontSize: 15)),
+            ]),
+            content: Text(
+                res.reason ?? 'No HTML entry file (index.html) was found.',
+                style: const TextStyle(color: AppTheme.muted, fontSize: 12.5)),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Back to Project'),
+              ),
+            ],
+          ),
+        );
+      }
+      return;
+
+    case PreviewOutcome.pagesPreview:
+    case PreviewOutcome.buildApk:
+    case PreviewOutcome.runOutput:
+      // Real remote pipelines with live logs.
+      await Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => PreviewPipelineScreen(plan: plan),
         ),
-        TextButton(
-          onPressed: () async {
-            Navigator.pop(ctx);
-            // Retry: the agent may have changed the project since.
-            final again = resolvePreview();
-            if (again.supported) {
-              await openProjectPreview(context);
-            } else {
-              ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                content: Text('Still unavailable: ${again.reason}'),
-              ));
-            }
-          },
-          child: const Text('Retry'),
+      );
+      return;
+
+    case PreviewOutcome.unavailable:
+      // Honest blocker dialog (no repo linked, no build system, …).
+      await showDialog<void>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: AppTheme.surface,
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          title: Row(children: const [
+            Icon(Icons.videocam_off_outlined, size: 18, color: AppTheme.warn),
+            SizedBox(width: 8),
+            Text('Preview unavailable', style: TextStyle(fontSize: 15)),
+          ]),
+          content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Project type: ${plan.projectType}',
+                    style: const TextStyle(
+                        color: AppTheme.text,
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w600)),
+                const SizedBox(height: 6),
+                Text(plan.blocker ??
+                    'This project type cannot be previewed on-device.',
+                    style: const TextStyle(
+                        color: AppTheme.muted, fontSize: 12.5)),
+              ]),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Back to Project'),
+            ),
+          ],
         ),
-        FilledButton(
-          style: FilledButton.styleFrom(backgroundColor: AppTheme.glowAccent),
-          onPressed: () => Navigator.pop(ctx),
-          child: const Text('Back to Project'),
-        ),
-      ],
-    ),
-  );
+      );
+      return;
+  }
 }

@@ -27,11 +27,20 @@ class PreviewScreen extends StatefulWidget {
   final String? html;
   final String? path;
 
+  /// A fully-qualified URL to load directly (e.g. the GitHub Pages URL of a
+  /// compiled Flutter/Vite preview). Takes precedence over [path].
+  final String? url;
+
   /// Friendly screen title for project previews (the project name).
   final String? projectTitle;
 
   const PreviewScreen(
-      {super.key, this.rawHtml, this.html, this.path, this.projectTitle});
+      {super.key,
+      this.rawHtml,
+      this.html,
+      this.path,
+      this.url,
+      this.projectTitle});
 
   /// Can this file be previewed in-app?
   static bool isPreviewable(String path) {
@@ -78,6 +87,15 @@ class _PreviewScreenState extends State<PreviewScreen> {
       _initController(raw);
       return;
     }
+    // Remote URL mode: compiled previews (GitHub Pages etc.) load directly.
+    final remote = widget.url;
+    if (remote != null && remote.isNotEmpty) {
+      if (!mounted) return;
+      setState(() => _serverMode = false);
+      _initControllerWithUrl(remote);
+      return;
+    }
+
     final path = widget.path;
     if (path == null) {
       if (mounted) setState(() => _error = 'Nothing to preview.');
