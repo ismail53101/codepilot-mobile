@@ -43,7 +43,12 @@ class ApiClient implements ChatBackend {
   static const _retryCap = Duration(seconds: 30);
   final SettingsStore _store;
 
-  ApiClient(this._store);
+  /// Injectable HTTP layer so tests can inspect exact request bodies and
+  /// simulate provider responses without network.
+  final http.Client Function() clientFactory;
+
+  ApiClient(this._store, {http.Client Function()? clientFactory})
+      : clientFactory = clientFactory ?? http.Client.new;
 
   Future<({ApiSettings s, String key})> _cfg() async {
     final r = await _store.loadWithKey();
@@ -100,7 +105,11 @@ class ApiClient implements ChatBackend {
             if (m.role == 'tool' && m.toolCallId != null) 'tool_call_id': m.toolCallId,
           },
       ],
-      'temperature': 0.2,
+      // Capability-aware: reasoning-first models (o-series, gpt-5*, Claude
+      // Opus 4.5+/5.x) reject `temperature` with HTTP 400 — omit it there.
+      // See [modelCapabilitiesFor].
+      if (modelCapabilitiesFor(s.modelId).supportsSamplingControls)
+        'temperature': 0.2,
       'stream': stream,
       if (tools != null) ...{'tools': tools, 'tool_choice': 'auto'},
     };
@@ -116,7 +125,7 @@ class ApiClient implements ChatBackend {
   /// Registers [client] so that cancelling [token] closes it, aborting the
   /// in-flight request. Returns the client for the caller's try/finally.
   http.Client _cancellableClient(CancelToken? token) {
-    final client = http.Client();
+    final client = clientFactory();
     if (token != null) {
       // close() aborts the socket; a later close() in finally is a no-op.
       unawaited(token.future.then((_) => client.close()));
@@ -212,14 +221,19 @@ class ApiClient implements ChatBackend {
   }
 
   /// Streaming SSE completion — yields text deltas as they arrive.
-  Stream<String> chatStream(List<ChatMessage> messages) async* {
+  Stream<String> chatStream(List<ChatMessage> messages,
+      {CancelToken? cancelToken}) async* {
     final (s: s, key: key) = await _cfg();
     final timeout = Duration(seconds: s.requestTimeout);
     final req = http.Request('POST', _uri(s, '/chat/completions'))
       ..headers.addAll(_headers(key))
       ..body = jsonEncode(_body(s, messages, stream: true));
+    final client = clientFactory();
+    if (cancelToken != null) {
+      unawaited(cancelToken.future.then((_) => client.close()));
+    }
     try {
-      final resp = await req.send().timeout(timeout);
+      final resp = await client.send(req).timeout(timeout);
       if (resp.statusCode != 200) {
         final text = await resp.stream.bytesToString();
         throw _statusError(_FakeResponse(resp.statusCode, text), s.modelId);
@@ -245,33 +259,71 @@ class ApiClient implements ChatBackend {
       throw ApiException('Stream timed out after ${s.requestTimeout}s.', 'timeout');
     } on SocketException catch (e) {
       throw ApiException('Network error: ${e.message}', 'network');
+    } on http.ClientException catch (e) {
+      if (cancelToken?.isCancelled ?? false) {
+        throw const ApiException('Cancelled.', 'cancelled');
+      }
+      throw ApiException('Network error: ${e.message}', 'network');
+    } finally {
+      client.close();
     }
   }
 
   ApiException _statusError(http.Response resp, String modelId) {
+    // Structured detail first: OpenAI-style gateways return
+    // {"error":{"type","code","param","message"}} — surface ALL of it
+    // (status + code + param + message) instead of a bare status number.
+    final detail = ProviderErrorDetail.fromBody(resp.statusCode, resp.body);
+    final detailSuffix =
+        detail == null ? '' : ' — ${detail.describe()}';
     final body = resp.body.toLowerCase();
     switch (resp.statusCode) {
+      case 400:
+        // Named-parameter 400s get an actionable message (e.g. temperature
+        // rejected by reasoning models).
+        final param = detail?.param ?? '';
+        final msg = detail?.message ?? '';
+        if (param.contains('temperature') ||
+            (msg.contains('temperature') && msg.contains('support'))) {
+          return ApiException(
+              'Provider rejected "temperature" for model "$modelId" (HTTP 400). '
+              'This model does not accept sampling controls; the request '
+              'builder now omits them for it — update the app and retry.'
+              '$detailSuffix',
+              'bad_request');
+        }
+        if (param.isNotEmpty || msg.isNotEmpty) {
+          return ApiException(
+              'Provider rejected the request (HTTP 400): '
+              '${msg.isNotEmpty ? msg : 'invalid ${param.isEmpty ? 'request' : param}'}'
+              '${param.isNotEmpty && msg.isNotEmpty ? ' [param: $param]' : ''}'
+              '${detail?.type != null ? ' (type: ${detail!.type})' : ''}',
+              'bad_request');
+        }
+        return ApiException(
+            'Provider error HTTP 400.$detailSuffix', 'bad_request');
       case 401:
-        return const ApiException(
-            'Invalid API key (HTTP 401). The provider rejected it — check Settings → API key.',
+        return ApiException(
+            'Invalid API key (HTTP 401). The provider rejected it — check Settings → API key.'
+            '$detailSuffix',
             'invalid_api_key');
       case 404:
         if (body.contains('model') &&
             (body.contains('not found') || body.contains('does not exist'))) {
-          return ApiException('Model "$modelId" was not found on this provider (HTTP 404). Check the Model ID.', 'unsupported_model');
+          return ApiException('Model "$modelId" was not found on this provider (HTTP 404). Check the Model ID.$detailSuffix', 'unsupported_model');
         }
-        return const ApiException('Endpoint not found (HTTP 404). Verify the Base URL.', 'provider');
+        return ApiException('Endpoint not found (HTTP 404). Verify the Base URL.$detailSuffix', 'provider');
       case 429:
         if (body.contains('insufficient_quota') ||
             body.contains('quota exceeded') ||
             body.contains('billing')) {
-          return const ApiException('Insufficient quota: the API key has no remaining credit for this model.', 'insufficient_quota');
+          return ApiException('Insufficient quota: the API key has no remaining credit for this model.$detailSuffix', 'insufficient_quota');
         }
-        return const ApiException('Rate limited (HTTP 429). Wait a moment and retry.', 'rate_limited');
+        return ApiException('Rate limited (HTTP 429). Wait a moment and retry.$detailSuffix', 'rate_limited');
       case >= 500:
-        return ApiException('Provider unavailable (HTTP ${resp.statusCode}). Try again shortly.', 'provider');
+        return ApiException('Provider unavailable (HTTP ${resp.statusCode}). Try again shortly.$detailSuffix', 'provider');
       default:
-        return ApiException('Provider error HTTP ${resp.statusCode}.', 'provider');
+        return ApiException('Provider error HTTP ${resp.statusCode}.$detailSuffix', 'provider');
     }
   }
 
@@ -291,22 +343,27 @@ class ApiClient implements ChatBackend {
   Future<(bool, String)> testConnection() async {
     try {
       final (s: s, key: key) = await _cfg();
-      final resp = await http
-          .post(_uri(s, '/chat/completions'),
-              headers: _headers(key),
-              body: jsonEncode({
-                'model': s.modelId,
-                'messages': [
-                  {'role': 'user', 'content': 'Reply with the single word: ok'}
-                ],
-              }))
-          .timeout(const Duration(seconds: 30));
-      if (resp.statusCode == 200) {
-        final body = jsonDecode(resp.body) as Map<String, dynamic>;
-        return (true, 'Connected. model=${body['model'] ?? s.modelId}');
+      final client = clientFactory();
+      try {
+        final resp = await client
+            .post(_uri(s, '/chat/completions'),
+                headers: _headers(key),
+                body: jsonEncode({
+                  'model': s.modelId,
+                  'messages': [
+                    {'role': 'user', 'content': 'Hi'}
+                  ],
+                }))
+            .timeout(const Duration(seconds: 30));
+        if (resp.statusCode == 200) {
+          final body = jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
+          return (true, 'Connected. model=${body['model'] ?? s.modelId}');
+        }
+        final e = _statusError(resp, s.modelId);
+        return (false, e.message);
+      } finally {
+        client.close();
       }
-      final e = _statusError(resp, s.modelId);
-      return (false, e.message);
     } on ApiException catch (e) {
       return (false, e.message);
     } catch (e) {

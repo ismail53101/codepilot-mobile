@@ -16,7 +16,12 @@ abstract class AiProviderBackend implements ChatBackend {
   final ProviderConfig config;
   final String key;
 
-  AiProviderBackend(this.config, this.key);
+  /// Injectable HTTP layer for tests; production uses real sockets.
+  final http.Client Function() clientFactory;
+
+  AiProviderBackend(this.config, this.key,
+      {http.Client Function()? clientFactory})
+      : clientFactory = clientFactory ?? http.Client.new;
 
   /// Real minimal request used by Test Connection in the Key Manager.
   Future<(bool, String)> testConnection();
@@ -44,8 +49,9 @@ Future<http.Response> _post(
   Object body, {
   required int timeoutSeconds,
   CancelToken? cancelToken,
+  http.Client Function()? clientFactory,
 }) async {
-  final client = http.Client();
+  final client = clientFactory?.call() ?? http.Client();
   if (cancelToken != null) {
     unawaited(cancelToken.future.then((_) => client.close()));
   }
@@ -124,8 +130,9 @@ Future<http.StreamedResponse> _postStream(
   required int timeoutSeconds,
   CancelToken? cancelToken,
   required ApiException Function(http.Response resp) onError,
+  http.Client Function()? clientFactory,
 }) async {
-  final client = http.Client();
+  final client = clientFactory?.call() ?? http.Client();
   if (cancelToken != null) {
     unawaited(cancelToken.future.then((_) => client.close()));
   }
@@ -133,7 +140,10 @@ Future<http.StreamedResponse> _postStream(
     final req = http.Request('POST', url)
       ..headers.addAll(headers)
       ..body = jsonEncode(body);
-    final resp = await req.send().timeout(Duration(seconds: timeoutSeconds));
+    // Send through [client] (NOT req.send(), which bypasses it) so the
+    // injected factory applies and cooperative cancel (close) truly aborts
+    // an in-flight stream.
+    final resp = await client.send(req).timeout(Duration(seconds: timeoutSeconds));
     if (resp.statusCode != 200) {
       final text = await resp.stream.bytesToString();
       throw onError(http.Response(text, resp.statusCode));
@@ -163,7 +173,7 @@ Future<http.StreamedResponse> _postStream(
 
 class OpenAiCompatibleBackend extends AiProviderBackend
     implements StreamingBackend {
-  OpenAiCompatibleBackend(super.config, super.key);
+  OpenAiCompatibleBackend(super.config, super.key, {super.clientFactory});
 
   late final ApiSettings _settings = ApiSettings(
     providerName: config.displayName,
@@ -208,7 +218,10 @@ class OpenAiCompatibleBackend extends AiProviderBackend
               'tool_call_id': m.toolCallId,
           },
       ],
-      'temperature': 0.2,
+      // Capability-aware sampling: reasoning-first models (o-series,
+      // gpt-5*, Claude Opus 4.5+/5.x) 400 on `temperature` — omit it there.
+      if (modelCapabilitiesFor(config.model).supportsSamplingControls)
+        'temperature': 0.2,
       'stream': stream,
       if (tools != null) ...{'tools': tools, 'tool_choice': 'auto'},
     };
@@ -228,6 +241,7 @@ class OpenAiCompatibleBackend extends AiProviderBackend
       _body(messages, tools: tools),
       timeoutSeconds: timeoutSeconds ?? 3600,
       cancelToken: cancelToken,
+      clientFactory: clientFactory,
     );
     if (resp.statusCode != 200) throw _statusError(resp, config);
     final body = jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
@@ -254,6 +268,7 @@ class OpenAiCompatibleBackend extends AiProviderBackend
       timeoutSeconds: timeoutSeconds ?? 3600,
       cancelToken: cancelToken,
       onError: (r) => _statusError(r, config),
+      clientFactory: clientFactory,
     );
     await for (final data in _sseData(resp)) {
       try {
@@ -278,10 +293,11 @@ class OpenAiCompatibleBackend extends AiProviderBackend
         {
           'model': config.model,
           'messages': [
-            {'role': 'user', 'content': 'Reply with the single word: ok'}
+            {'role': 'user', 'content': 'Hi'}
           ],
         },
         timeoutSeconds: 30,
+        clientFactory: clientFactory,
       );
       if (resp.statusCode == 200) return (true, 'Connected to ${config.type.label}.');
       final e = _statusError(resp, config);
@@ -338,7 +354,7 @@ List<ToolCall> _parseOpenAiToolCalls(List? raw) {
 
 class GeminiBackend extends AiProviderBackend
     implements StreamingBackend {
-  GeminiBackend(super.config, super.key);
+  GeminiBackend(super.config, super.key, {super.clientFactory});
 
   Uri _uri(String model, String method) => Uri.parse(
       '${config.effectiveBaseUrl.replaceAll(RegExp(r'/+$'), '')}'
@@ -425,7 +441,11 @@ class GeminiBackend extends AiProviderBackend
       if (system.isNotEmpty)
         'systemInstruction': {'parts': [{'text': system.toString()}]},
       'contents': contents,
-      'generationConfig': {'temperature': 0.2},
+      'generationConfig':
+          // Gemini reasoning variants also reject sampling controls.
+          modelCapabilitiesFor(config.model).supportsSamplingControls
+              ? {'temperature': 0.2}
+              : <String, dynamic>{},
       if (tools != null && tools.isNotEmpty)
         'tools': [
           {
@@ -456,6 +476,7 @@ class GeminiBackend extends AiProviderBackend
       _convert(messages, tools: tools),
       timeoutSeconds: timeoutSeconds ?? 3600,
       cancelToken: cancelToken,
+      clientFactory: clientFactory,
     );
     if (resp.statusCode != 200) throw _statusError(resp, config);
     final body = jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
@@ -508,6 +529,7 @@ class GeminiBackend extends AiProviderBackend
       timeoutSeconds: timeoutSeconds ?? 3600,
       cancelToken: cancelToken,
       onError: (r) => _statusError(r, config),
+      clientFactory: clientFactory,
     );
     await for (final data in _sseData(resp)) {
       try {
@@ -540,12 +562,13 @@ class GeminiBackend extends AiProviderBackend
             {
               'role': 'user',
               'parts': [
-                {'text': 'Reply with the single word: ok'}
+                {'text': 'Hi'}
               ],
             },
           ],
         },
         timeoutSeconds: 30,
+        clientFactory: clientFactory,
       );
       if (resp.statusCode == 200) return (true, 'Connected to Google Gemini.');
       final e = _statusError(resp, config);
@@ -582,7 +605,7 @@ class GeminiBackend extends AiProviderBackend
 // ----------------------------------------------------------------------
 
 class AnthropicBackend extends AiProviderBackend {
-  AnthropicBackend(super.config, super.key);
+  AnthropicBackend(super.config, super.key, {super.clientFactory});
 
   Uri get _uri => Uri.parse(
       '${config.effectiveBaseUrl.replaceAll(RegExp(r'/+$'), '')}/v1/messages');
@@ -674,8 +697,11 @@ class AnthropicBackend extends AiProviderBackend {
 
     return {
       'model': config.model,
-      'max_tokens': 8192,
-      'temperature': 0.2,
+      'max_tokens': modelCapabilitiesFor(config.model).maxTokens,
+      // Capability-aware: Claude reasoning/extended-thinking families
+      // (Opus 4.5+, Claude 5.x) reject `temperature` with HTTP 400.
+      if (modelCapabilitiesFor(config.model).supportsSamplingControls)
+        'temperature': 0.2,
       if (system.isNotEmpty) 'system': system.toString(),
       'messages': out,
       if (tools != null && tools.isNotEmpty)
@@ -704,6 +730,7 @@ class AnthropicBackend extends AiProviderBackend {
       _convert(messages, tools: tools),
       timeoutSeconds: timeoutSeconds ?? 3600,
       cancelToken: cancelToken,
+      clientFactory: clientFactory,
     );
     if (resp.statusCode != 200) throw _statusError(resp, config);
     final body = jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
@@ -742,12 +769,13 @@ class AnthropicBackend extends AiProviderBackend {
             {
               'role': 'user',
               'content': [
-                {'type': 'text', 'text': 'Reply with the single word: ok'}
+                {'type': 'text', 'text': 'Hi'}
               ],
             },
           ],
         },
         timeoutSeconds: 30,
+        clientFactory: clientFactory,
       );
       if (resp.statusCode == 200) return (true, 'Connected to Anthropic.');
       final e = _statusError(resp, config);
@@ -776,13 +804,39 @@ class AnthropicBackend extends AiProviderBackend {
 // ----------------------------------------------------------------------
 
 ApiException _statusError(http.Response resp, ProviderConfig config) {
-  final body = resp.body.toLowerCase();
+  // Surface the provider's structured error (status + type + code + param
+  // + message) before the coarse keyword classification.
+  final detail = ProviderErrorDetail.fromBody(resp.statusCode, resp.body);
+  final detailSuffix = detail == null ? '' : ' — ${detail.describe()}';
   final label = config.type.label;
+  final body = resp.body.toLowerCase();
   switch (resp.statusCode) {
+    case 400:
+      final param = detail?.param ?? '';
+      final msg = detail?.message ?? '';
+      if (param.contains('temperature') ||
+          (msg.contains('temperature') && msg.contains('support'))) {
+        return ApiException(
+            'Provider rejected "temperature" for model "${config.model}" '
+            '(HTTP 400). This model does not accept sampling controls; '
+            'the app now omits them for it — update and retry.',
+            'bad_request');
+      }
+      if (param.isNotEmpty || msg.isNotEmpty) {
+        return ApiException(
+            '$label rejected the request (HTTP 400): '
+            '${msg.isNotEmpty ? msg : 'invalid ${param.isEmpty ? 'request' : param}'}'
+            '${param.isNotEmpty && msg.isNotEmpty ? ' [param: $param]' : ''}'
+            '${detail?.type != null ? ' (type: ${detail!.type})' : ''}',
+            'bad_request');
+      }
+      return ApiException(
+          '$label error HTTP 400.$detailSuffix', 'bad_request');
     case 401:
     case 403:
       return ApiException(
-          'Invalid or unauthorized API key for $label (HTTP ${resp.statusCode}).',
+          'Invalid or unauthorized API key for $label (HTTP ${resp.statusCode}).'
+          '$detailSuffix',
           'invalid_api_key');
     case 404:
       if (body.contains('model') &&
@@ -790,23 +844,23 @@ ApiException _statusError(http.Response resp, ProviderConfig config) {
               body.contains('does not exist') ||
               body.contains('not_supported'))) {
         return ApiException(
-            'Model "${config.model}" was not found on $label (HTTP 404).',
+            'Model "${config.model}" was not found on $label (HTTP 404).$detailSuffix',
             'unsupported_model');
       }
-      return ApiException('Endpoint not found on $label (HTTP 404). Check the Base URL.', 'provider');
+      return ApiException('Endpoint not found on $label (HTTP 404). Check the Base URL.$detailSuffix', 'provider');
     case 429:
       if (body.contains('quota') ||
           body.contains('billing') ||
           body.contains('insufficient') ||
           body.contains('credit')) {
         return ApiException(
-            'Insufficient quota on $label: this key has no remaining credit.',
+            'Insufficient quota on $label: this key has no remaining credit.$detailSuffix',
             'insufficient_quota');
       }
-      return ApiException('Rate limited by $label (HTTP 429).', 'rate_limited');
+      return ApiException('Rate limited by $label (HTTP 429).$detailSuffix', 'rate_limited');
     case >= 500:
       return ApiException(
-          '$label is temporarily unavailable (HTTP ${resp.statusCode}).', 'provider');
+          '$label is temporarily unavailable (HTTP ${resp.statusCode}).$detailSuffix', 'provider');
     default:
       // Provider-specific 400s (e.g. Gemini API_KEY_INVALID, Anthropic
       // authentication_error) surface here — classify by body markers.
@@ -817,10 +871,9 @@ ApiException _statusError(http.Response resp, ProviderConfig config) {
           body.contains('unregistered') ||
           body.contains('api key not valid')) {
         return ApiException('Invalid API key for $label.', 'invalid_api_key');
+      }      if (body.contains('resource_exhausted') || body.contains('quota')) {
+        return ApiException('Quota exceeded on $label.$detailSuffix', 'insufficient_quota');
       }
-      if (body.contains('resource_exhausted') || body.contains('quota')) {
-        return ApiException('Quota exceeded on $label.', 'insufficient_quota');
-      }
-      return ApiException('$label error HTTP ${resp.statusCode}.', 'provider');
+      return ApiException('$label error HTTP ${resp.statusCode}.$detailSuffix', 'provider');
+    }
   }
-}

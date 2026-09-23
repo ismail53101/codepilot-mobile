@@ -1,6 +1,8 @@
 /// Data models shared across screens and services.
 library models;
 
+import 'dart:convert';
+
 /// Non-secret provider settings (persisted via shared_preferences).
 /// The API key NEVER lives here — see SecureStore.
 class ApiSettings {
@@ -396,4 +398,128 @@ class GitFileChange {
   final String status; // M | A | D | ?
 
   const GitFileChange(this.path, this.status);
+}
+
+// ------------------------------------------------------------------
+// Model capability detection + provider error parsing
+// ------------------------------------------------------------------
+
+/// What request parameters a model accepts. The app sends the same body
+/// shape to every OpenAI-compatible model today; some families (reasoning
+/// models, several Anthropic OpenAI-compat gateways) reject sampling
+/// controls with HTTP 400, so the request builder must be
+/// capability-aware instead of blindly sending `temperature` everywhere.
+class ModelCapabilities {
+  /// Whether `temperature` / `top_p` may be sent.
+  final bool supportsSamplingControls;
+
+  /// Fixed request cap for Anthropic-native `max_tokens` (required field).
+  final int maxTokens;
+
+  const ModelCapabilities({
+    required this.supportsSamplingControls,
+    this.maxTokens = 8192,
+  });
+
+  static const ModelCapabilities standard = ModelCapabilities(
+      supportsSamplingControls: true);
+
+  static const ModelCapabilities reasoning = ModelCapabilities(
+      supportsSamplingControls: false);
+}
+
+/// Detect capabilities from the model id. Deliberately conservative:
+/// unknown models keep the current behavior (sampling controls sent).
+///
+/// Known reasoning-first families that reject `temperature`/`top_p` with
+/// HTTP 400 ("temperature does not support ..."):
+/// - OpenAI o-series (o1/o3/o4…, incl. suffixed variants)
+/// - OpenAI gpt-5* reasoning line
+/// - Anthropic Claude Opus 4.5+ / extended-thinking line (claude-opus-5.5
+///   via OpenAI-compatible gateways 400s on temperature)
+ModelCapabilities modelCapabilitiesFor(String modelId) {
+  final id = modelId.trim().toLowerCase();
+  if (id.isEmpty) return ModelCapabilities.standard;
+
+  // OpenAI o-series: o1, o3-mini, o4-mini-2025-04-16, openai/o1-preview…
+  if (RegExp(r'(^|[/:.])o[134]([-._a-z0-9]*)$').hasMatch(id)) {
+    return ModelCapabilities.reasoning;
+  }
+  // gpt-5 reasoning line (gpt-5, gpt-5-mini, openai/gpt-5.2…).
+  if (RegExp(r'(^|[/:])gpt-5').hasMatch(id)) {
+    return ModelCapabilities.reasoning;
+  }
+  // Claude Opus 4.5+ / Claude 5+ (claude-opus-5.5, claude-opus-4-5, …).
+  // Older claude-3*/claude-4* (non-opus-4-5) keep sampling controls.
+  if (RegExp(r'claude-(opus-[5-9]|opus-[4-9]-[5-9]|[5-9])').hasMatch(id) ||
+      RegExp(r'claude-opus-4-[5-9]').hasMatch(id)) {
+    return ModelCapabilities.reasoning;
+  }
+  return ModelCapabilities.standard;
+}
+
+/// A provider HTTP error decoded into its structured parts. OpenAI-style
+/// gateways answer `{"error":{"message","type","param","code"}}`;
+/// Anthropic uses `type`/`message` at the top level.
+class ProviderErrorDetail {
+  final int status;
+  final String? code;
+  final String? param;
+  final String? message;
+  final String? type;
+
+  const ProviderErrorDetail({
+    required this.status,
+    this.code,
+    this.param,
+    this.message,
+    this.type,
+  });
+
+  /// Parse from any HTTP response body; never throws.
+  static ProviderErrorDetail? fromBody(int status, String body) {
+    Map<String, dynamic>? obj;
+    try {
+      final decoded = jsonDecode(body);
+      if (decoded is Map<String, dynamic>) obj = decoded;
+    } catch (_) {
+      obj = null;
+    }
+    if (obj == null) return null;
+
+    final err = obj['error'];
+    if (err is Map) {
+      return ProviderErrorDetail(
+        status: status,
+        code: err['code'] is String ? err['code'] as String : null,
+        param: err['param'] is String ? err['param'] as String : null,
+        message: err['message'] is String ? err['message'] as String : null,
+        type: err['type'] is String ? err['type'] as String : null,
+      );
+    }
+    // Anthropic-style top-level error object.
+    if (obj['type'] is String && obj['message'] is String) {
+      return ProviderErrorDetail(
+        status: status,
+        message: obj['message'] as String,
+        type: obj['type'] as String,
+        code: obj['code'] is String ? obj['code'] as String : null,
+      );
+    }
+    return null;
+  }
+
+  /// Human-readable one-liner carrying EVERYTHING the provider disclosed:
+  /// status, type, code, param and message. `param` is the key detail for
+  /// 400s — it names the exact rejected request field (e.g. `temperature`).
+  String describe() {
+    final parts = <String>[
+      'HTTP $status',
+      if (type != null && type!.isNotEmpty) 'type=$type',
+      if (code != null && code!.isNotEmpty) 'code=$code',
+      if (param != null && param!.isNotEmpty) 'param=$param',
+      if (message != null && message!.isNotEmpty) 'message=$message',
+    ];
+    return parts.join(' · ');
+  }
 }
