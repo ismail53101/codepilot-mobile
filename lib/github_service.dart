@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
@@ -112,7 +113,7 @@ class EmailOtpService {
       <p style="color:#8b949e;font-size:12px;margin:20px 0 0;">This code expires in 10 minutes. If you didn't request it, you can ignore this email.</p>
     </div>
   </body>
-  </html>
+</html>
 ''';
   }
 
@@ -185,24 +186,70 @@ GitHubRepo? githubRepoFromZipballLayout(List<String> rootEntryNames,
 class GitHubService {
   static const _publishRequestTimeout = Duration(seconds: 30);
   final SettingsStore store;
-  GitHubService(this.store);
+
+  /// Injectable HTTP client for tests. When null, a fresh client is created
+  /// per request and closed afterwards.
+  final http.Client? httpClient;
+  GitHubService(this.store, {this.httpClient});
 
   Future<String?> readToken() => store.readGitHubToken();
   Future<void> saveToken(String token) => store.writeGitHubToken(token);
   Future<void> deleteToken() => store.deleteGitHubToken();
 
+  /// Sends [fn] on a short-lived client with a hard timeout. Every GitHub
+  /// request in this class goes through here so client lifetime and timeout
+  /// handling exist in exactly one place.
+  Future<http.Response> _send(Future<http.Response> Function(http.Client c) fn,
+      {Duration timeout = _publishRequestTimeout}) async {
+    final client = httpClient ?? http.Client();
+    try {
+      return await fn(client).timeout(timeout);
+    } finally {
+      client.close();
+    }
+  }
+
+  Future<http.Response> _get(Uri url, Map<String, String> headers,
+          {Duration? timeout}) =>
+      _send((c) => c.get(url, headers: headers),
+          timeout: timeout ?? _publishRequestTimeout);
+
+  Future<http.Response> _post(Uri url, Map<String, String> headers,
+          {Object? body, Duration? timeout}) =>
+      _send((c) => c.post(url, headers: headers, body: body),
+          timeout: timeout ?? _publishRequestTimeout);
+
+  Future<http.Response> _patch(Uri url, Map<String, String> headers,
+          {Object? body, Duration? timeout}) =>
+      _send((c) => c.patch(url, headers: headers, body: body),
+          timeout: timeout ?? _publishRequestTimeout);
+
+  Future<http.Response> _put(Uri url, Map<String, String> headers,
+          {Object? body, Duration? timeout}) =>
+      _send((c) => c.put(url, headers: headers, body: body),
+          timeout: timeout ?? _publishRequestTimeout);
+
+  Future<http.Response> _delete(Uri url, Map<String, String> headers,
+          {Object? body, Duration? timeout}) =>
+      _send((c) => c.delete(url, headers: headers, body: body),
+          timeout: timeout ?? _publishRequestTimeout);
+
+  // ==================================================================
+  // OAuth device flow
+  // ==================================================================
+
   /// Starts GitHub's OAuth device flow. The caller displays the user_code and
   /// opens verification_uri in a browser; this method polls until authorized.
   Future<({String userCode, String verificationUri, String deviceCode})> startDeviceFlow() async {
+    const deviceUrl = 'https://github.com/login/device/code';
     final http.Response response;
     try {
-      response = await http
-          .post(
-            Uri.parse('https://github.com/login/device/code'),
-            headers: const {'Accept': 'application/json'},
-            body: {'client_id': githubOAuthClientId, 'scope': 'repo read:user'},
-          )
-          .timeout(const Duration(seconds: 20));
+      response = await _post(
+        Uri.parse(deviceUrl),
+        const {'Accept': 'application/json'},
+        body: {'client_id': githubOAuthClientId, 'scope': 'repo read:user'},
+        timeout: const Duration(seconds: 20),
+      );
     } on SocketException {
       throw const GitHubException('No network connection. Check Wi-Fi/data and try again.');
     } on http.ClientException catch (e) {
@@ -213,7 +260,13 @@ class GitHubService {
     } on TimeoutException {
       throw const GitHubException('github.com took too long to respond. Try again.');
     }
-    if (response.statusCode != 200) throw GitHubException(_error(response));
+    // HTTP 404 here means GitHub does not recognize the OAuth app's
+    // client_id (deleted/revoked app, or device flow disabled) — GitHub
+    // answers {"error":"Not Found"} with NO "message" key, which used to
+    // render as the meaningless "GitHub request failed (HTTP 404)."
+    if (response.statusCode != 200) {
+      throw GitHubException(_error(response, method: 'POST', url: deviceUrl));
+    }
     final Map<String, dynamic> data;
     try {
       data = jsonDecode(response.body) as Map<String, dynamic>;
@@ -252,19 +305,20 @@ class GitHubService {
     var interval = const Duration(seconds: 5); // GitHub default
     const maxAttempts = 120; // ~10 min at the default interval
 
+    const tokenUrl = 'https://github.com/login/oauth/access_token';
+
     Future<http.Response?> pollOnce() async {
       try {
-        final response = await http
-            .post(
-              Uri.parse('https://github.com/login/oauth/access_token'),
-              headers: const {'Accept': 'application/json'},
-              body: {
-                'client_id': githubOAuthClientId,
-                'device_code': deviceCode,
-                'grant_type': 'urn:ietf:params:oauth:grant-type:device_code',
-              },
-            )
-            .timeout(const Duration(seconds: 20));
+        final response = await _post(
+          Uri.parse(tokenUrl),
+          const {'Accept': 'application/json'},
+          body: {
+            'client_id': githubOAuthClientId,
+            'device_code': deviceCode,
+            'grant_type': 'urn:ietf:params:oauth:grant-type:device_code',
+          },
+          timeout: const Duration(seconds: 20),
+        );
         return response;
       } on http.ClientException {
         return null; // transient transport failure — caller retries
@@ -335,7 +389,14 @@ class GitHubService {
               'The GitHub App does not allow device sign-in. Report this bug.');
         default:
           if (error != null) {
-            throw GitHubException('GitHub error: $error');
+            // Covers hard HTTP failures (404 {"error":"Not Found"} from a
+            // revoked/unknown client_id, 5xx, …) with the REAL status and
+            // GitHub's error text — never an endless silent poll.
+            final desc = data['error_description'] as String?;
+            throw GitHubException(
+                'GitHub sign-in failed: $error${desc == null ? '' : ' — $desc'} '
+                '(HTTP ${response.statusCode}). If this keeps happening, sign '
+                'out and sign in again.');
           }
         // No error and no token: malformed body — keep polling a little.
       }
@@ -351,10 +412,12 @@ class GitHubService {
   Future<({String login, String? avatarUrl})> fetchAuthenticatedUser() async {
     final headers = await _auth();
     try {
-      final response = await http
-          .get(Uri.parse('https://api.github.com/user'), headers: headers)
-          .timeout(const Duration(seconds: 20));
-      if (response.statusCode != 200) throw GitHubException(_error(response));
+      const userUrl = 'https://api.github.com/user';
+      final response = await _get(Uri.parse(userUrl), headers,
+          timeout: const Duration(seconds: 20));
+      if (response.statusCode != 200) {
+        throw GitHubException(_error(response, method: 'GET', url: userUrl));
+      }
       final data = jsonDecode(response.body) as Map<String, dynamic>;
       return (
         login: (data['login'] as String?) ?? 'github-user',
@@ -377,12 +440,69 @@ class GitHubService {
     return {'Authorization': 'Bearer ${token.trim()}', 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28'};
   }
 
-  Future<List<GitHubRepo>> listRepos() async {
+  /// Repositories of the authenticated user: GET /user/repos (paginated,
+  /// up to [maxPages] × 100). Includes member/collaborator repos so imports
+  /// work for org repositories the user has write access to.
+  Future<List<GitHubRepo>> listRepos({int maxPages = 3}) async {
     final headers = await _auth();
-    final response = await http.get(Uri.parse('https://api.github.com/user/repos?per_page=100&sort=updated'), headers: headers);
-    if (response.statusCode != 200) throw GitHubException(_error(response));
-    final data = jsonDecode(response.body) as List;
-    return [for (final item in data) GitHubRepo.fromJson(item as Map<String, dynamic>)];
+    const urlBase = 'https://api.github.com/user/repos';
+    final repos = <GitHubRepo>[];
+    var page = 1;
+    while (page <= maxPages) {
+      final response = await _get(
+          Uri.parse('$urlBase?per_page=100&sort=updated&page=$page'),
+          headers);
+      if (response.statusCode != 200) {
+        throw GitHubException(
+            _error(response, method: 'GET', url: '$urlBase (page $page)'));
+      }
+      final data = jsonDecode(response.body) as List;
+      repos.addAll([
+        for (final item in data) GitHubRepo.fromJson(item as Map<String, dynamic>)
+      ]);
+      if (data.length < 100) break;
+      page++;
+    }
+    return repos;
+  }
+
+  /// Creates a repository for the AUTHENTICATED user:
+  /// POST /user/repos — the only endpoint that works for the OAuth user
+  /// token this app stores (org-scoped creation needs a different grant).
+  /// Requires the `repo` (or `public_repo`) scope. Returns the created repo
+  /// with its real default_branch so the caller can persist it.
+  Future<GitHubRepo> createRepository({
+    required String name,
+    required bool isPrivate,
+    String? description,
+    String? defaultBranch,
+  }) async {
+    final trimmed = name.trim();
+    if (trimmed.isEmpty) {
+      throw const GitHubException('Repository name cannot be empty.');
+    }
+    if (RegExp(r'[^A-Za-z0-9._-]').hasMatch(trimmed)) {
+      throw const GitHubException(
+          'Repository name may only contain letters, numbers, ".", "_" and "-".');
+    }
+    final headers = await _auth()..['Content-Type'] = 'application/json';
+    const url = 'https://api.github.com/user/repos';
+    final body = {
+      'name': trimmed,
+      'private': isPrivate,
+      'auto_init': false,
+      if (description != null && description.trim().isNotEmpty)
+        'description': description.trim(),
+      if (defaultBranch != null && defaultBranch.trim().isNotEmpty)
+        'default_branch': defaultBranch.trim(),
+    };
+    final response = await _post(Uri.parse(url), headers, body: jsonEncode(body));
+    // 201 = created. Anything else is a REAL failure (422 name exists,
+    // 401/403 scope problem, 404 stale client) — surfaced verbatim.
+    if (response.statusCode != 201) {
+      throw GitHubException(_error(response, method: 'POST', url: url));
+    }
+    return GitHubRepo.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
   }
 
   /// Fetch the repository's real metadata (default branch, existence).
@@ -391,19 +511,24 @@ class GitHubService {
   /// [GitHubException] when the API is unreachable or the repo is gone.
   Future<GitHubRepo> fetchRepoDetails(GitHubRepo repo) async {
     final headers = await _auth();
-    final response = await http
-        .get(
-            Uri.parse('https://api.github.com/repos/${repo.owner}/${repo.name}'),
-            headers: headers)
-        .timeout(_publishRequestTimeout);
-    if (response.statusCode != 200) throw GitHubException(_error(response));
+    final url =
+        'https://api.github.com/repos/${repo.owner}/${repo.name}';
+    final response = await _get(Uri.parse(url), headers);
+    if (response.statusCode != 200) {
+      throw GitHubException(_error(response, method: 'GET', url: url));
+    }
     return GitHubRepo.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
   }
 
   Future<String> importRepo(GitHubRepo repo, ProjectService projects) async {
     final headers = await _auth();
-    final response = await http.get(Uri.parse('https://api.github.com/repos/${repo.owner}/${repo.name}/zipball/${Uri.encodeComponent(repo.defaultBranch)}'), headers: headers);
-    if (response.statusCode != 200) throw GitHubException(_error(response));
+    final url =
+        'https://api.github.com/repos/${repo.owner}/${repo.name}/zipball/${Uri.encodeComponent(repo.defaultBranch)}';
+    final response = await _get(Uri.parse(url), headers,
+        timeout: const Duration(seconds: 120));
+    if (response.statusCode != 200) {
+      throw GitHubException(_error(response, method: 'GET', url: url));
+    }
     final temp = await getTemporaryDirectory();
     final zip = File(p.join(temp.path, '${repo.owner}_${repo.name}.zip'));
     await zip.writeAsBytes(response.bodyBytes, flush: true);
@@ -415,19 +540,23 @@ class GitHubService {
     var published = 0;
     for (final change in changes.where((c) => !c.undone)) {
       final endpoint = Uri.parse('https://api.github.com/repos/${repo.owner}/${repo.name}/contents/${_encodePath(change.path)}');
-      final existing = await http.get(endpoint, headers: headers);
+      final existing = await _get(endpoint, headers);
       String? sha;
       if (existing.statusCode == 200) sha = (jsonDecode(existing.body) as Map)['sha'] as String?;
       if (change.kind == 'delete') {
         if (sha == null) continue;
         final body = {'message': 'CodeFexa: delete ${change.path}', 'sha': sha, 'branch': repo.defaultBranch};
-        final response = await http.delete(endpoint, headers: {...headers, 'Content-Type': 'application/json'}, body: jsonEncode(body));
-        if (response.statusCode != 200) throw GitHubException(_error(response));
+        final response = await _delete(endpoint, {...headers, 'Content-Type': 'application/json'},
+            body: jsonEncode(body));
+        if (response.statusCode != 200) throw GitHubException(_error(response, method: 'DELETE', url: endpoint));
       } else {
         final content = change.contentAfter ?? '';
         final body = {'message': 'CodeFexa: update ${change.path}', 'content': base64Encode(utf8.encode(content)), 'branch': repo.defaultBranch, if (sha != null) 'sha': sha};
-        final response = await http.put(endpoint, headers: {...headers, 'Content-Type': 'application/json'}, body: jsonEncode(body));
-        if (response.statusCode != 200 && response.statusCode != 201) throw GitHubException(_error(response));
+        final response = await _put(endpoint, {...headers, 'Content-Type': 'application/json'},
+            body: jsonEncode(body));
+        if (response.statusCode != 200 && response.statusCode != 201) {
+          throw GitHubException(_error(response, method: 'PUT', url: endpoint));
+        }
       }
       published++;
     }
@@ -436,15 +565,58 @@ class GitHubService {
 
   String _encodePath(String path) => path.split('/').map(Uri.encodeComponent).join('/');
 
-  String _error(http.Response response) {
+  // ==================================================================
+  // Error transparency
+  // ==================================================================
+
+  /// Human message for a failed GitHub response. GitHub has TWO error body
+  /// shapes: api.github.com uses `{"message": "…"}` while the github.com
+  /// OAuth endpoints use `{"error": "…", "error_description": "…"}` — the
+  /// device-flow 404 for a bad client_id is exactly `{"error":"Not Found"}`
+  /// with no `message`, which used to degrade to the bare
+  /// "GitHub request failed (HTTP 404)." with the endpoint and cause hidden.
+  /// This surfaces the HTTP status, the request method + endpoint, and
+  /// GitHub's own message verbatim. Exposed for tests.
+  @visibleForTesting
+  static String describeApiError(int statusCode, String body,
+      {String? method, Object? url}) {
+    final where = (method != null && url != null) ? ' [$method $url]' : '';
+    String? detail;
     try {
-      final json = jsonDecode(response.body) as Map;
-      return json['message'] as String? ??
-          'GitHub request failed (HTTP ${response.statusCode}).';
+      final json = jsonDecode(body);
+      if (json is Map) {
+        final m = json['message'];
+        final e = json['error'];
+        if (m is String && m.trim().isNotEmpty) {
+          detail = m.trim();
+        } else if (e is String && e.trim().isNotEmpty) {
+          detail = e.trim();
+          final d = json['error_description'];
+          if (d is String && d.trim().isNotEmpty) detail = '$detail — ${d.trim()}';
+        }
+      }
     } catch (_) {
-      return 'GitHub request failed (HTTP ${response.statusCode}).';
+      // Non-JSON body — handled below as a raw snippet.
     }
+    final hint = statusCode == 404
+        ? ' The resource may not exist, or the app\'s GitHub connection is '
+            'stale — sign out and sign in again if this keeps happening.'
+        : '';
+    if (detail == null || detail.isEmpty) {
+      if (body.trim().isEmpty) {
+        return 'GitHub request failed (HTTP $statusCode) — no response body.$where$hint';
+      }
+      final trimmedBody = body.trim();
+      final snippet = trimmedBody.length > 180
+          ? '${trimmedBody.substring(0, 180)}…'
+          : trimmedBody;
+      return 'GitHub request failed (HTTP $statusCode). Response: $snippet$where$hint';
+    }
+    return 'GitHub: $detail (HTTP $statusCode)$where$hint';
   }
+
+  String _error(http.Response response, {String? method, Object? url}) =>
+      describeApiError(response.statusCode, response.body, method: method, url: url);
 
   // ==================================================================
   // Real Git Data API: branches, commits, pull requests, CI status.
@@ -455,12 +627,12 @@ class GitHubService {
   /// List branches of [repo] (name + sha), most relevant first.
   Future<List<({String name, String sha})>> listBranches(GitHubRepo repo) async {
     final headers = await _auth();
-    final response = await http
-        .get(Uri.parse(
-            'https://api.github.com/repos/${repo.owner}/${repo.name}/branches?per_page=100'),
-            headers: headers)
-        .timeout(const Duration(seconds: 30));
-    if (response.statusCode != 200) throw GitHubException(_error(response));
+    final url =
+        'https://api.github.com/repos/${repo.owner}/${repo.name}/branches?per_page=100';
+    final response = await _get(Uri.parse(url), headers);
+    if (response.statusCode != 200) {
+      throw GitHubException(_error(response, method: 'GET', url: url));
+    }
     final data = jsonDecode(response.body) as List;
     return [
       for (final b in data)
@@ -478,21 +650,20 @@ class GitHubService {
       ..['Content-Type'] = 'application/json';
     var sha = fromSha;
     if (sha == null) {
-      final head = await http.get(
-          Uri.parse(
-              'https://api.github.com/repos/${repo.owner}/${repo.name}/git/ref/heads/${Uri.encodeComponent(repo.defaultBranch)}'),
-          headers: headers);
-      if (head.statusCode != 200) throw GitHubException(_error(head));
+      final refUrl =
+          'https://api.github.com/repos/${repo.owner}/${repo.name}/git/ref/heads/${Uri.encodeComponent(repo.defaultBranch)}';
+      final head = await _get(Uri.parse(refUrl), headers);
+      if (head.statusCode != 200) {
+        throw GitHubException(_error(head, method: 'GET', url: refUrl));
+      }
       sha = ((jsonDecode(head.body) as Map)['object'] as Map)['sha'] as String;
     }
-    final response = await http.post(
-      Uri.parse(
-          'https://api.github.com/repos/${repo.owner}/${repo.name}/git/refs'),
-      headers: headers,
-      body: jsonEncode({'ref': 'refs/heads/$branchName', 'sha': sha}),
-    );
+    final refsUrl =
+        'https://api.github.com/repos/${repo.owner}/${repo.name}/git/refs';
+    final response = await _post(Uri.parse(refsUrl), headers,
+        body: jsonEncode({'ref': 'refs/heads/$branchName', 'sha': sha}));
     if (response.statusCode != 201) {
-      final msg = _error(response);
+      final msg = _error(response, method: 'POST', url: refsUrl);
       if (response.statusCode == 422) {
         throw GitHubException('Branch "$branchName" already exists.');
       }
@@ -501,24 +672,24 @@ class GitHubService {
     return sha;
   }
 
-  /// Create a blob for [content] and return its sha.
+  /// Create a blob for [bytes] and return its sha.
   Future<String> _createBlob(
       GitHubRepo repo, List<int> bytes, Map<String, String> headers) async {
-    final response = await http
-        .post(
-          Uri.parse(
-              'https://api.github.com/repos/${repo.owner}/${repo.name}/git/blobs'),
-          headers: headers,
-          body: jsonEncode({
-            // GitHub's Git Data API accepts base64 for both text and binary
-            // blobs. Never decode project bytes as UTF-8 here: images,
-            // archives, keystores, and native libraries must stay lossless.
-            'content': base64Encode(bytes),
-            'encoding': 'base64',
-          }),
-        )
-        .timeout(_publishRequestTimeout);
-    if (response.statusCode != 201) throw GitHubException(_error(response));
+    final url = 'https://api.github.com/repos/${repo.owner}/${repo.name}/git/blobs';
+    final response = await _post(
+      Uri.parse(url),
+      headers,
+      body: jsonEncode({
+        // GitHub's Git Data API accepts base64 for both text and binary
+        // blobs. Never decode project bytes as UTF-8 here: images,
+        // archives, keystores, and native libraries must stay lossless.
+        'content': base64Encode(bytes),
+        'encoding': 'base64',
+      }),
+    );
+    if (response.statusCode != 201) {
+      throw GitHubException(_error(response, method: 'POST', url: url));
+    }
     return (jsonDecode(response.body) as Map)['sha'] as String;
   }
 
@@ -531,31 +702,27 @@ class GitHubService {
     required GitHubRepo repo,
     required String branch,
     required String message,
-      required Map<String, List<int>?> files,
+    required Map<String, List<int>?> files,
   }) async {
     final headers = await _auth()
       ..['Content-Type'] = 'application/json';
+    final base = 'https://api.github.com/repos/${repo.owner}/${repo.name}';
 
     // 1. Base commit + its tree.
-    final headResp = await http
-        .get(
-            Uri.parse(
-                'https://api.github.com/repos/${repo.owner}/${repo.name}/git/ref/heads/${Uri.encodeComponent(branch)}'),
-            headers: headers)
-        .timeout(_publishRequestTimeout);
+    final refUrl = '$base/git/ref/heads/${Uri.encodeComponent(branch)}';
+    final headResp = await _get(Uri.parse(refUrl), headers);
     if (headResp.statusCode != 200) {
       throw GitHubException(
-          'Branch "$branch" not found on ${repo.fullName}. Create it first (create_branch).');
+          '${_error(headResp, method: 'GET', url: refUrl)} Branch "$branch" not '
+          'found on ${repo.fullName} — create it first (create_branch).');
     }
     final baseSha =
         ((jsonDecode(headResp.body) as Map)['object'] as Map)['sha'] as String;
-    final baseCommitResp = await http
-        .get(
-            Uri.parse(
-                'https://api.github.com/repos/${repo.owner}/${repo.name}/git/commits/$baseSha'),
-            headers: headers)
-        .timeout(_publishRequestTimeout);
-    if (baseCommitResp.statusCode != 200) throw GitHubException(_error(baseCommitResp));
+    final commitUrl = '$base/git/commits/$baseSha';
+    final baseCommitResp = await _get(Uri.parse(commitUrl), headers);
+    if (baseCommitResp.statusCode != 200) {
+      throw GitHubException(_error(baseCommitResp, method: 'GET', url: commitUrl));
+    }
     final baseTree = (jsonDecode(baseCommitResp.body) as Map)['tree']['sha'] as String;
 
     // 2. Build the new tree from the full file snapshot.
@@ -582,40 +749,32 @@ class GitHubService {
         });
       }
     }
-    final treeResp = await http
-        .post(
-          Uri.parse(
-              'https://api.github.com/repos/${repo.owner}/${repo.name}/git/trees'),
-          headers: headers,
-          body: jsonEncode({'base_tree': baseTree, 'tree': treeEntries}),
-        )
-        .timeout(_publishRequestTimeout);
-    if (treeResp.statusCode != 201) throw GitHubException(_error(treeResp));
+    final treeUrl = '$base/git/trees';
+    final treeResp = await _post(Uri.parse(treeUrl), headers,
+        body: jsonEncode({'base_tree': baseTree, 'tree': treeEntries}));
+    if (treeResp.statusCode != 201) {
+      throw GitHubException(_error(treeResp, method: 'POST', url: treeUrl));
+    }
     final newTree = (jsonDecode(treeResp.body) as Map)['sha'] as String;
 
     // 3. Commit object with the new tree.
-    final commitResp = await http
-        .post(
-          Uri.parse(
-              'https://api.github.com/repos/${repo.owner}/${repo.name}/git/commits'),
-          headers: headers,
-          body: jsonEncode({'message': message, 'tree': newTree, 'parents': [baseSha]}),
-        )
-        .timeout(_publishRequestTimeout);
-    if (commitResp.statusCode != 201) throw GitHubException(_error(commitResp));
+    final commitsUrl = '$base/git/commits';
+    final commitResp = await _post(Uri.parse(commitsUrl), headers,
+        body: jsonEncode({'message': message, 'tree': newTree, 'parents': [baseSha]}));
+    if (commitResp.statusCode != 201) {
+      throw GitHubException(_error(commitResp, method: 'POST', url: commitsUrl));
+    }
     final commit = jsonDecode(commitResp.body) as Map;
     final commitSha = commit['sha'] as String;
 
-    // 4. Move the branch ref to the new commit.
-    final refResp = await http
-        .patch(
-          Uri.parse(
-              'https://api.github.com/repos/${repo.owner}/${repo.name}/git/refs/heads/${Uri.encodeComponent(branch)}'),
-          headers: headers,
-          body: jsonEncode({'sha': commitSha, 'force': false}),
-        )
-        .timeout(_publishRequestTimeout);
-    if (refResp.statusCode != 200) throw GitHubException(_error(refResp));
+    // 4. Move the branch ref to the new commit — NEVER a force update.
+    final refPatchUrl =
+        '$base/git/refs/heads/${Uri.encodeComponent(branch)}';
+    final refResp = await _patch(Uri.parse(refPatchUrl), headers,
+        body: jsonEncode({'sha': commitSha, 'force': false}));
+    if (refResp.statusCode != 200) {
+      throw GitHubException(_error(refResp, method: 'PATCH', url: refPatchUrl));
+    }
 
     return (
       sha: commitSha,
@@ -630,12 +789,12 @@ class GitHubService {
       {String body = ''}) async {
     final headers = await _auth()
       ..['Content-Type'] = 'application/json';
-    final response = await http.post(
-      Uri.parse('https://api.github.com/repos/${repo.owner}/${repo.name}/pulls'),
-      headers: headers,
-      body: jsonEncode({'title': title, 'head': head, 'base': base, 'body': body}),
-    );
-    if (response.statusCode != 201) throw GitHubException(_error(response));
+    final url = 'https://api.github.com/repos/${repo.owner}/${repo.name}/pulls';
+    final response = await _post(Uri.parse(url), headers,
+        body: jsonEncode({'title': title, 'head': head, 'base': base, 'body': body}));
+    if (response.statusCode != 201) {
+      throw GitHubException(_error(response, method: 'POST', url: url));
+    }
     final data = jsonDecode(response.body) as Map;
     return (number: data['number'] as int, url: data['html_url'] as String);
   }
@@ -644,11 +803,12 @@ class GitHubService {
   Future<({String status, String? conclusion, int runId, String url})?>
       latestRun(GitHubRepo repo, String branch) async {
     final headers = await _auth();
-    final response = await http.get(
-        Uri.parse(
-            'https://api.github.com/repos/${repo.owner}/${repo.name}/actions/runs?branch=${Uri.encodeComponent(branch)}&per_page=1'),
-        headers: headers);
-    if (response.statusCode != 200) throw GitHubException(_error(response));
+    final url =
+        'https://api.github.com/repos/${repo.owner}/${repo.name}/actions/runs?branch=${Uri.encodeComponent(branch)}&per_page=1';
+    final response = await _get(Uri.parse(url), headers);
+    if (response.statusCode != 200) {
+      throw GitHubException(_error(response, method: 'GET', url: url));
+    }
     final runs = ((jsonDecode(response.body) as Map)['workflow_runs'] as List?) ?? const [];
     if (runs.isEmpty) return null;
     final run = runs.first as Map;
@@ -664,11 +824,13 @@ class GitHubService {
   /// Returns the first ~6k chars of the failed job's log.
   Future<String> fetchFailureLog(GitHubRepo repo, int runId) async {
     final headers = await _auth();
-    final jobsResp = await http.get(
-        Uri.parse(
-            'https://api.github.com/repos/${repo.owner}/${repo.name}/actions/runs/$runId/jobs'),
-        headers: headers);
-    if (jobsResp.statusCode != 200) throw GitHubException(_error(jobsResp));
+    final jobsUrl =
+        'https://api.github.com/repos/${repo.owner}/${repo.name}/actions/runs/$runId/jobs';
+    final jobsResp = await _get(Uri.parse(jobsUrl), headers,
+        timeout: const Duration(seconds: 60));
+    if (jobsResp.statusCode != 200) {
+      throw GitHubException(_error(jobsResp, method: 'GET', url: jobsUrl));
+    }
     final jobs = (jsonDecode(jobsResp.body) as Map)['jobs'] as List;
     Map? failed;
     for (final j in jobs) {
@@ -680,13 +842,13 @@ class GitHubService {
     failed ??= jobs.isEmpty ? null : jobs.first as Map;
     if (failed == null) return 'No jobs found for this run.';
     final jobId = failed['id'] as int;
-    final logResp = await http
-        .get(Uri.parse(
-            'https://api.github.com/repos/${repo.owner}/${repo.name}/actions/jobs/$jobId/logs'),
-            headers: headers)
-        .timeout(const Duration(seconds: 60));
+    final logUrl =
+        'https://api.github.com/repos/${repo.owner}/${repo.name}/actions/jobs/$jobId/logs';
+    final logResp = await _get(Uri.parse(logUrl), headers,
+        timeout: const Duration(seconds: 60));
     if (logResp.statusCode != 200) {
-      return 'Could not download the log (HTTP ${logResp.statusCode}).';
+      return 'Could not download the log '
+          '(${describeApiError(logResp.statusCode, logResp.body, method: 'GET', url: logUrl)})';
     }
     var log = logResp.body;
     if (log.length > 6000) {
@@ -701,13 +863,13 @@ class GitHubService {
       {String? branch}) async {
     final headers = await _auth();
     final ref = branch ?? repo.defaultBranch;
-    final response = await http
-        .get(
-            Uri.parse(
-                'https://api.github.com/repos/${repo.owner}/${repo.name}/zipball/${Uri.encodeComponent(ref)}'),
-            headers: headers)
-        .timeout(const Duration(seconds: 120));
-    if (response.statusCode != 200) throw GitHubException(_error(response));
+    final url =
+        'https://api.github.com/repos/${repo.owner}/${repo.name}/zipball/${Uri.encodeComponent(ref)}';
+    final response = await _get(Uri.parse(url), headers,
+        timeout: const Duration(seconds: 120));
+    if (response.statusCode != 200) {
+      throw GitHubException(_error(response, method: 'GET', url: url));
+    }
     final temp = await getTemporaryDirectory();
     final zip = File(p.join(temp.path, '${repo.owner}_${repo.name}_$ref.zip'));
     await zip.writeAsBytes(response.bodyBytes, flush: true);

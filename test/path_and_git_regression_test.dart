@@ -1,7 +1,9 @@
+import 'dart:convert' show Encoding, jsonDecode, jsonEncode;
 import 'dart:io';
 
 import 'package:archive/archive_io.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
 import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -466,4 +468,265 @@ void main() {
       expect(await svc.changedFilesSinceBaseline(), isEmpty);
     });
   });
+
+  group('GitHub error transparency (the HTTP 404 fix)', () {
+    test('api.github.com error bodies surface the real message + endpoint', () {
+      // Real 401 body shape from api.github.com.
+      final msg = GitHubService.describeApiError(
+          401, '{"message":"Bad credentials","documentation_url":"…"}',
+          method: 'GET', url: 'https://api.github.com/user/repos');
+      expect(msg, contains('Bad credentials'));
+      expect(msg, contains('HTTP 401'));
+      expect(msg, contains('GET https://api.github.com/user/repos'));
+    });
+
+    test('the device-flow 404 (no "message" key) is no longer generic', () {
+      // Exact body github.com returns for an unknown/revoked client_id:
+      // {"error":"Not Found"} — previously rendered as the bare
+      // "GitHub request failed (HTTP 404)."
+      final msg = GitHubService.describeApiError(404, '{"error":"Not Found"}',
+          method: 'POST', url: 'https://github.com/login/device/code');
+      expect(msg, isNot(contains('GitHub request failed (HTTP 404).')));
+      expect(msg, contains('Not Found'));
+      expect(msg, contains('HTTP 404'));
+      expect(msg, contains('POST https://github.com/login/device/code'));
+      expect(msg, contains('sign out and sign in again'));
+    });
+
+    test('non-JSON bodies are shown as a snippet, never dropped', () {
+      final msg = GitHubService.describeApiError(502, '<html>Bad gateway</html>',
+          method: 'GET', url: 'https://api.github.com/user');
+      expect(msg, contains('HTTP 502'));
+      expect(msg, contains('&lt;html&gt;'.replaceAll('&lt;', '<').replaceAll('&gt;', '>').replaceAll('&amp;', '&')));
+      expect(msg, contains('Bad gateway'));
+    });
+
+    test('empty bodies say so explicitly', () {
+      final msg = GitHubService.describeApiError(502, '',
+          method: 'GET', url: 'https://api.github.com/user');
+      expect(msg, contains('no response body'));
+      expect(msg, contains('HTTP 502'));
+    });
+
+    test('404 messages include the stale-connection hint', () {
+      final msg = GitHubService.describeApiError(
+          404, '{"message":"Not Found"}',
+          method: 'GET', url: 'https://api.github.com/repos/a/b');
+      expect(msg, contains('sign out and sign in again'));
+    });
+  });
+
+  group('GitHubService over a fake HTTP layer', () {
+    late _FakeHttp http;
+    late GitHubService github;
+
+    setUp(() {
+      SharedPreferences.setMockInitialValues({});
+      http = _FakeHttp();
+      github = GitHubService(SettingsStore(secure: _MemorySecureStore()),
+          httpClient: http);
+    });
+
+    Future<void> writeToken(String token) async {
+      await github.saveToken(token);
+    }
+
+    test('createRepository POSTs to /user/repos with name+private',
+        () async {
+      await writeToken('t');
+      http.respond = (req) => _FakeResponse(
+          201,
+          jsonEncode({
+            'name': 'my-new-repo',
+            'private': true,
+            'default_branch': 'main',
+            'owner': {'login': 'ismail53101'},
+          }));
+      final repo = await github.createRepository(
+          name: 'my-new-repo', isPrivate: true, description: 'demo');
+      expect(repo.fullName, 'ismail53101/my-new-repo');
+      expect(repo.privateRepo, isTrue);
+      expect(http.requests.single.method, 'POST');
+      expect(http.requests.single.url.toString(),
+          startsWith('https://api.github.com/user/repos'));
+      final body = jsonDecode(http.requests.single.body) as Map;
+      expect(body['name'], 'my-new-repo');
+      expect(body['private'], isTrue);
+      expect(body['auto_init'], isFalse);
+      expect(body['description'], 'demo');
+    });
+
+    test('createRepository surfaces GitHub\'s real 422 error', () async {
+      await writeToken('t');
+      http.respond = (req) => _FakeResponse(
+          422,
+          jsonEncode({
+            'message': 'name already exists on this account',
+            'documentation_url': 'https://docs.github.com/rest/repos/repos',
+          }));
+      await expectLater(
+        github.createRepository(name: 'dup', isPrivate: false),
+        throwsA(isA<GitHubException>().having((e) => e.message, 'message',
+            contains('name already exists on this account'))),
+      );
+      // ...and the failing request really was POST /user/repos.
+      expect(http.requests.single.url.toString(),
+          contains('api.github.com/user/repos'));
+    });
+
+    test('listRepos paginates until a short page', () async {
+      await writeToken('t');
+      Map<String, dynamic> item(int i) => {
+            'name': 'repo-$i',
+            'private': false,
+            'default_branch': 'main',
+            'owner': {'login': 'ismail53101'},
+          };
+      http.respond = (req) {
+        final page = int.parse(req.url.queryParameters['page'] ?? '1');
+        if (page == 1) {
+          return _FakeResponse(200, jsonEncode(List.generate(100, item)));
+        }
+        return _FakeResponse(200, jsonEncode([item(101), item(102)]));
+      };
+      final repos = await github.listRepos(maxPages: 3);
+      expect(repos, hasLength(102));
+      expect(repos.first.name, 'repo-0');
+      expect(repos.last.name, 'repo-102');
+      final pages =
+          http.requests.map((r) => r.url.queryParameters['page']).toList();
+      expect(pages, ['1', '2']);
+    });
+
+    test('a 404 from api.github.com names the endpoint and status', () async {
+      await writeToken('t');
+      http.respond = (req) => _FakeResponse(
+          404, jsonEncode({'message': 'Not Found'}));
+      try {
+        await github.fetchRepoDetails(const GitHubRepo(
+            owner: 'a', name: 'b', defaultBranch: 'main', privateRepo: false));
+        fail('expected GitHubException');
+      } on GitHubException catch (e) {
+        expect(e.message, contains('HTTP 404'));
+        expect(e.message, contains('GET https://api.github.com/repos/a/b'));
+        expect(e.message, contains('Not Found'));
+      }
+    });
+  });
+
+  group('repository-link management (no GitHub deletion, ever)', () {
+    test('removing the link clears prefs and the project manifest', () async {
+      final svc = await newLegacyWrappedProject();
+      final store = SettingsStore();
+      final repoStore = GitHubProjectStore(store, projects: svc);
+      await repoStore.save(const GitHubRepo(
+          owner: 'ismail53101',
+          name: 'codepilot-mobile',
+          defaultBranch: 'main',
+          privateRepo: false));
+      await svc.linkGitHubRepo('ismail53101', 'codepilot-mobile',
+          branch: 'main');
+
+      // The link exists, then is removed — prefs AND manifest.
+      expect(await repoStore.load(), isNotNull);
+      await repoStore.clear();
+      await svc.updateManifest({'gitRepository': null, 'gitBranch': null});
+      expect(await repoStore.load(), isNull);
+      final manifest = await svc.loadManifest();
+      expect(manifest['gitRepository'], isNull);
+      // Nothing on GitHub is touched — nothing to assert beyond no-throw,
+      // the point is no DELETE call exists on this path.
+    });
+  });
+}
+
+/// In-memory SecureStore so tests never touch the flutter_secure_storage
+/// platform channel.
+class _MemorySecureStore implements SecureStore {
+  final _values = <String, String?>{};
+
+  @override
+  Future<String?> readApiKey() async => _values['key'];
+  @override
+  Future<void> writeApiKey(String key) async => _values['key'] = key;
+  @override
+  Future<void> deleteApiKey() async => _values['key'] = null;
+  @override
+  Future<String?> readGitHubToken() async => _values['gh'];
+  @override
+  Future<void> writeGitHubToken(String token) async => _values['gh'] = token;
+  @override
+  Future<void> deleteGitHubToken() async => _values['gh'] = null;
+}
+
+class _FakeHttp implements http.Client {
+  final requests = <http.Request>[];
+  http.Response Function(http.BaseRequest request) respond =
+      (_) => _FakeResponse(500, 'no handler');
+
+  http.Request _record(String method, Uri url, Map<String, String>? headers,
+      Object? body) {
+    final req = http.Request(method, url)..headers.addAll(headers ?? {});
+    if (body is String) {
+      req.body = body;
+    } else if (body is List<int>) {
+      req.bodyBytes = body;
+    } else if (body is Map) {
+      req.bodyFields = body.cast<String, String>();
+    }
+    requests.add(req);
+    return req;
+  }
+
+  @override
+  Future<http.Response> get(Uri url, {Map<String, String>? headers}) async {
+    final req = _record('GET', url, headers, null);
+    return respond(req);
+  }
+
+  @override
+  Future<http.Response> post(Uri url,
+      {Map<String, String>? headers, Object? body, Encoding? encoding}) async {
+    final req = _record('POST', url, headers, body);
+    return respond(req);
+  }
+
+  @override
+  Future<http.Response> patch(Uri url,
+      {Map<String, String>? headers, Object? body, Encoding? encoding}) async {
+    final req = _record('PATCH', url, headers, body);
+    return respond(req);
+  }
+
+  @override
+  Future<http.Response> put(Uri url,
+      {Map<String, String>? headers, Object? body, Encoding? encoding}) async {
+    final req = _record('PUT', url, headers, body);
+    return respond(req);
+  }
+
+  @override
+  Future<http.Response> delete(Uri url,
+      {Map<String, String>? headers, Object? body, Encoding? encoding}) async {
+    final req = _record('DELETE', url, headers, body);
+    return respond(req);
+  }
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    final resp = respond(request);
+    return http.StreamedResponse(
+        Stream.value(resp.bodyBytes), resp.statusCode,
+        headers: resp.headers);
+  }
+
+  @override
+  void close() {}
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _FakeResponse extends http.Response {
+  _FakeResponse(int statusCode, String body) : super(body, statusCode);
 }

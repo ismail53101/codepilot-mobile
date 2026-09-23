@@ -33,7 +33,10 @@ class _GitHubScreenState extends State<GitHubScreen> {
   }
 
   Future<void> _loadSelected() async {
-    final repo = await githubProjectStore.load();
+    // Prefer the canonical resolution (saved repo → recovered imported-repo
+    // identity) so the connected card reflects the repo the publish button
+    // and agent git tools actually use.
+    final repo = await githubProjectStore.resolveForActiveProject();
     if (!mounted) return;
     // Keep the ACTIVE project's link in lockstep with the integration:
     // connecting/switching repos here refreshes the open project's remote;
@@ -125,6 +128,72 @@ class _GitHubScreenState extends State<GitHubScreen> {
     } finally {
       if (mounted) setState(() => _busy = false);
     }
+  }
+
+  /// Creates a repository on the authenticated user's account via the
+  /// GitHub API (POST /user/repos) and immediately saves + shows it as the
+  /// connected repository so it can be imported without re-signing in.
+  Future<void> _createRepository() async {
+    final result = await _NewRepoSheet.show(context);
+    if (result == null || !mounted) return;
+    setState(() { _busy = true; _message = 'Creating ${result.name}…'; });
+    try {
+      final repo = await githubService.createRepository(
+        name: result.name,
+        isPrivate: result.isPrivate,
+        description: result.description,
+      );
+      await githubProjectStore.save(repo);
+      final repos = await githubService.listRepos();
+      if (!mounted) return;
+      setState(() {
+        _repos = repos;
+        _selected = repo;
+        _message = 'Created ${repo.fullName} (${repo.privateRepo ? 'private' : 'public'}). It can now be imported below.';
+      });
+    } on GitHubException catch (e) {
+      if (mounted) setState(() => _message = e.message);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  /// Removes the repository LINK from CodeFexa (integration prefs + active
+  /// project manifest). The repository itself on GitHub is NEVER touched.
+  Future<void> _disconnectRepositoryLink() async {
+    final repo = _selected;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Remove linked repository?'),
+        content: Text(
+            'This removes ${repo?.fullName ?? 'the repository'} from CodeFexa '
+            'only.\n\nNothing is deleted on GitHub — the repository and its '
+            'history stay untouched.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Remove link')),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    await githubProjectStore.clear();
+    try {
+      await projectService
+          .updateManifest({'gitRepository': null, 'gitBranch': null});
+    } catch (_) {
+      // Manifest sync is best-effort; the cleared prefs are the source of
+      // truth and resolveForActiveProject drops stale links anyway.
+    }
+    if (!mounted) return;
+    setState(() {
+      _selected = null;
+      _message = 'Repository link removed. It stays on GitHub — connect or import again anytime.';
+    });
   }
 
   /// CodePilot email sign-in: one-time code by email. Links the address to
@@ -307,13 +376,54 @@ class _GitHubScreenState extends State<GitHubScreen> {
                       child: const Text('Sign in')),
             ),
           ),
-          if (_selected != null) Card(color: AppTheme.surface2, child: ListTile(leading: const Icon(Icons.cloud_done, color: AppTheme.ok), title: Text(_selected!.fullName), subtitle: Text('Default branch: ${_selected!.defaultBranch}'))),
+          // ---- Connected repository card: shows the repo publish/agent git
+          // tools actually use, with switch/remove actions.
+          if (_selected != null)
+            Card(
+              color: AppTheme.surface2,
+              child: ListTile(
+                leading: Icon(
+                    _selected!.privateRepo ? Icons.lock : Icons.cloud_done,
+                    color: AppTheme.ok),
+                title: Text(_selected!.fullName),
+                subtitle: Text(
+                    'Connected · default branch: ${_selected!.defaultBranch}'),
+                isThreeLine: false,
+                trailing: PopupMenuButton<String>(
+                  onSelected: (v) {
+                    if (v == 'remove') _disconnectRepositoryLink();
+                  },
+                  itemBuilder: (_) => const [
+                    PopupMenuItem(
+                        value: 'remove',
+                        child: ListTile(
+                          contentPadding: EdgeInsets.zero,
+                          dense: true,
+                          leading: Icon(Icons.link_off,
+                              color: AppTheme.muted, size: 20),
+                          title: Text('Remove link',
+                              style: TextStyle(fontSize: 14)),
+                          subtitle: Text('Repo stays on GitHub',
+                              style: TextStyle(fontSize: 11)),
+                        )),
+                  ],
+                ),
+              ),
+            ),
           Card(child: Padding(padding: const EdgeInsets.all(16), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             const Text('Connect GitHub', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 18)),
             const SizedBox(height: 8),
             Text('Sign in securely with the device flow. Your authorization token is stored only in Android secure storage.', style: TextStyle(color: AppTheme.muted, fontSize: 13)),
             const SizedBox(height: 12),
             FilledButton.icon(onPressed: _busy ? null : _showSigninOptions, icon: const Icon(Icons.login), label: Text(_busy ? 'Working…' : 'Sign in')),
+            if (_ghConnected) ...[
+              const SizedBox(height: 12),
+              OutlinedButton.icon(
+                onPressed: _busy ? null : _createRepository,
+                icon: const Icon(Icons.add_circle_outline),
+                label: const Text('Create New Repository'),
+              ),
+            ],
             if (!_ghConnected) ...[
               const SizedBox(height: 12),
               const Center(child: Text('or connect with a token', style: TextStyle(fontSize: 12))),
@@ -323,17 +433,179 @@ class _GitHubScreenState extends State<GitHubScreen> {
               FilledButton.icon(onPressed: _busy ? null : _connect, icon: const Icon(Icons.login), label: Text(_busy ? 'Working…' : 'Connect and load repositories')),
             ],
           ]))),
-          if (_message != null) Padding(padding: const EdgeInsets.all(12), child: Text(_message!, style: TextStyle(color: _message!.contains('failed') || _message!.contains('Enter') ? AppTheme.err : AppTheme.ok))),
+          if (_message != null) Padding(padding: const EdgeInsets.all(12), child: Text(_message!, style: TextStyle(color: _message!.startsWith('GitHub request failed') || _message!.contains('failed') || _message!.contains('ERROR') || _message!.contains('Enter') ? AppTheme.err : AppTheme.ok))),
           if (_repos.isNotEmpty) ...[
             const SizedBox(height: 8),
             const Text('Repositories', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 18)),
             const SizedBox(height: 8),
-            for (final repo in _repos) Card(child: ListTile(leading: Icon(repo.privateRepo ? Icons.lock : Icons.public, color: AppTheme.accent), title: Text(repo.fullName), subtitle: Text('branch: ${repo.defaultBranch}'), trailing: FilledButton(onPressed: _busy ? null : () => _import(repo), child: const Text('Import')))),
+            for (final repo in _repos)
+              Card(
+                color: _selected?.fullName == repo.fullName
+                    ? AppTheme.surface2
+                    : null,
+                child: ListTile(
+                  leading: Icon(repo.privateRepo ? Icons.lock : Icons.public,
+                      color: AppTheme.accent),
+                  title: Text(repo.fullName),
+                  subtitle: Text(
+                      'branch: ${repo.defaultBranch}'
+                      '${_selected?.fullName == repo.fullName ? ' · connected' : ''}'),
+                  trailing: FilledButton(
+                      onPressed: _busy ? null : () => _import(repo),
+                      child: Text(_selected?.fullName == repo.fullName
+                          ? 'Re-import'
+                          : 'Import')),
+                ),
+              ),
           ],
           const SizedBox(height: 12),
           Text('After importing, use prompts in AI Chat. Review each proposed change before applying it, then use “Publish to GitHub” to commit the confirmed changes.', style: TextStyle(color: AppTheme.muted, fontSize: 13)),
         ]),
       );
+}
+
+/// Name/description/visibility chooser for POST /user/repos.
+class _NewRepoResult {
+  final String name;
+  final bool isPrivate;
+  final String? description;
+  const _NewRepoResult(this.name, this.isPrivate, this.description);
+}
+
+class _NewRepoSheet extends StatefulWidget {
+  const _NewRepoSheet();
+
+  /// Returns the chosen values, or null when cancelled.
+  static Future<_NewRepoResult?> show(BuildContext context) async {
+    final result = await showModalBottomSheet<_NewRepoResult>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => const _NewRepoSheet(),
+    );
+    return result;
+  }
+
+  @override
+  State<_NewRepoSheet> createState() => _NewRepoSheetState();
+}
+
+class _NewRepoSheetState extends State<_NewRepoSheet> {
+  final _name = TextEditingController();
+  final _description = TextEditingController();
+  bool _private = false;
+
+  @override
+  void dispose() {
+    _name.dispose();
+    _description.dispose();
+    super.dispose();
+  }
+
+  void _submit(BuildContext context) {
+    final name = _name.text.trim();
+    if (name.isEmpty) return;
+    Navigator.pop(
+        context,
+        _NewRepoResult(
+            name, _private,
+            _description.text.trim().isEmpty ? null : _description.text.trim()));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding:
+          EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
+      child: Container(
+        decoration: const BoxDecoration(
+          color: AppTheme.navyPanel,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+          border: Border(top: BorderSide(color: AppTheme.border)),
+        ),
+        padding: const EdgeInsets.fromLTRB(24, 16, 24, 32),
+        child: SafeArea(
+          top: false,
+          child: Column(mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+            Container(
+              width: 40,
+              height: 4,
+              margin: const EdgeInsets.only(bottom: 20),
+              decoration: BoxDecoration(
+                color: AppTheme.border,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            const Icon(Icons.add_circle_outline,
+                color: AppTheme.glowAccent, size: 30),
+            const SizedBox(height: 8),
+            const Text('Create new repository',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                    color: AppTheme.text,
+                    fontSize: 18,
+                    fontWeight: FontWeight.w700)),
+            const SizedBox(height: 4),
+            const Text(
+                'Created on your GitHub account via the authenticated API.',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: AppTheme.muted, fontSize: 12)),
+            const SizedBox(height: 16),
+            TextField(
+              controller: _name,
+              autocorrect: false,
+              enabled: true,
+              maxLength: 100,
+              style: const TextStyle(color: AppTheme.text),
+              cursorColor: AppTheme.glowAccent,
+              decoration: const InputDecoration(
+                labelText: 'Repository name',
+                hintText: 'my-new-project',
+                counterText: '',
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _description,
+              maxLength: 200,
+              style: const TextStyle(color: AppTheme.text),
+              cursorColor: AppTheme.glowAccent,
+              decoration: const InputDecoration(
+                labelText: 'Description (optional)',
+                counterText: '',
+              ),
+            ),
+            SwitchListTile(
+              value: _private,
+              onChanged: (v) => setState(() => _private = v),
+              contentPadding: EdgeInsets.zero,
+              activeColor: AppTheme.glowAccent,
+              title: Text(_private ? 'Private' : 'Public',
+                  style: const TextStyle(color: AppTheme.text, fontSize: 15)),
+              subtitle: Text(
+                  _private
+                      ? 'Only you can see this repository'
+                      : 'Visible to everyone',
+                  style: const TextStyle(color: AppTheme.muted, fontSize: 12)),
+            ),
+            const SizedBox(height: 8),
+            FilledButton.icon(
+              onPressed: () => _submit(context),
+              icon: const Icon(Icons.create_outlined, size: 18),
+              label: const Text('Create repository'),
+            ),
+            const SizedBox(height: 4),
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel',
+                  style: TextStyle(color: AppTheme.muted)),
+            ),
+          ]),
+        ),
+      ),
+    );
+  }
 }
 
 /// One row of the sign-in method chooser sheet.
