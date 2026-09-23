@@ -247,7 +247,14 @@ class GitHubService {
       response = await _post(
         Uri.parse(deviceUrl),
         const {'Accept': 'application/json'},
-        body: {'client_id': githubOAuthClientId, 'scope': 'repo read:user'},
+        // `workflow` is REQUIRED for committing .github/workflows/* files:
+        // without it GitHub's Git Data API rejects POST /git/trees with a
+        // misleading HTTP 404 — exactly the "Publish FAILED … git/trees 404"
+        // report. The repo scope alone is not enough for workflow paths.
+        body: {
+          'client_id': githubOAuthClientId,
+          'scope': 'repo workflow read:user',
+        },
         timeout: const Duration(seconds: 20),
       );
     } on SocketException {
@@ -753,7 +760,23 @@ class GitHubService {
     final treeResp = await _post(Uri.parse(treeUrl), headers,
         body: jsonEncode({'base_tree': baseTree, 'tree': treeEntries}));
     if (treeResp.statusCode != 201) {
-      throw GitHubException(_error(treeResp, method: 'POST', url: treeUrl));
+      var message = _error(treeResp, method: 'POST', url: treeUrl);
+      // GitHub returns HTTP 404 for POST /git/trees when the tree touches
+      // .github/workflows/* but the OAuth token lacks the `workflow` scope
+      // (blob creation succeeds because blobs carry no path). Turn that
+      // specific lie into the truth + the exact remediation.
+      final touchesWorkflow = files.keys.any((path) =>
+          path == '.github' ||
+          path.startsWith('.github/') ||
+          path.contains('/.github/'));
+      if (treeResp.statusCode == 404 && touchesWorkflow) {
+        message = 'GitHub rejected the commit because this sign-in token is '
+            'missing the "workflow" permission needed to commit '
+            '.github/workflows/ files. Fix: Integrations → GitHub → sign '
+            'out, then sign in again (the new sign-in requests the '
+            'workflow scope) and publish once more.\n$message';
+      }
+      throw GitHubException(message);
     }
     final newTree = (jsonDecode(treeResp.body) as Map)['sha'] as String;
 

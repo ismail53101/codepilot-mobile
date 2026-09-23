@@ -1,4 +1,4 @@
-import 'dart:convert' show Encoding, jsonDecode, jsonEncode;
+import 'dart:convert' show Encoding, jsonDecode, jsonEncode, utf8;
 import 'dart:io';
 
 import 'package:archive/archive_io.dart';
@@ -596,6 +596,109 @@ void main() {
       final pages =
           http.requests.map((r) => r.url.queryParameters['page']).toList();
       expect(pages, ['1', '2']);
+    });
+
+    test('device flow requests the workflow scope (commit-workflows fix)',
+        () async {
+      await writeToken('t');
+      http.respond = (req) =>
+          _FakeResponse(200, jsonEncode({'user_code': 'ABCD-1234',
+              'device_code': 'dc', 'verification_uri': 'https://github.com/login/device'}));
+      await github.startDeviceFlow();
+      final req = http.requests.single;
+      expect(req.url.toString(), contains('github.com/login/device/code'));
+      // The `workflow` scope is what lets POST /git/trees accept commits
+      // touching .github/workflows/* — without it GitHub answers 404.
+      expect(req.bodyFields['scope'], contains('repo'));
+      expect(req.bodyFields['scope'], contains('workflow'));
+    });
+
+    test('commitTree: workflow-file 404 explains the missing workflow scope',
+        () async {
+      await writeToken('t');
+      // Sequence mirrors the real publish: ref read OK, base commit read OK,
+      // blob OK, then POST /git/trees → 404 (GitHub's misleading response
+      // for tokens without the workflow scope touching .github/workflows/).
+      var call = 0;
+      http.respond = (req) {
+        final url = req.url.toString();
+        if (url.endsWith('/git/ref/heads/main')) {
+          return _FakeResponse(200,
+              jsonEncode({'object': {'sha': 'basesha'}}));
+        }
+        if (url.contains('/git/commits/basesha')) {
+          return _FakeResponse(
+              200, jsonEncode({'tree': {'sha': 'basetree'}}));
+        }
+        if (url.endsWith('/git/blobs')) {
+          return _FakeResponse(201, jsonEncode({'sha': 'blobsha'}));
+        }
+        if (url.endsWith('/git/trees')) {
+          call++;
+          return _FakeResponse(404, jsonEncode({'message': 'Not Found'}));
+        }
+        return _FakeResponse(500, 'unexpected: $url');
+      };
+      try {
+        await github.commitTree(
+          repo: const GitHubRepo(
+              owner: 'ismail53101',
+              name: 'My-sample-project',
+              defaultBranch: 'main',
+              privateRepo: false),
+          branch: 'main',
+          message: 'test',
+          files: {
+            'README.md': utf8.encode('hello'),
+            '.github/workflows/flutter-build.yml': utf8.encode('on: push'),
+          },
+        );
+        fail('expected GitHubException');
+      } on GitHubException catch (e) {
+        expect(e.message, contains('workflow'));
+        expect(e.message, contains('sign out'));
+        expect(e.message, contains('HTTP 404'));
+      }
+      expect(call, 1); // the 404 really came from POST /git/trees
+    });
+
+    test('commitTree: a plain-file 404 keeps the raw endpoint error',
+        () async {
+      await writeToken('t');
+      http.respond = (req) {
+        final url = req.url.toString();
+        if (url.endsWith('/git/ref/heads/main')) {
+          return _FakeResponse(200,
+              jsonEncode({'object': {'sha': 'basesha'}}));
+        }
+        if (url.contains('/git/commits/basesha')) {
+          return _FakeResponse(
+              200, jsonEncode({'tree': {'sha': 'basetree'}}));
+        }
+        if (url.endsWith('/git/blobs')) {
+          return _FakeResponse(201, jsonEncode({'sha': 'blobsha'}));
+        }
+        if (url.endsWith('/git/trees')) {
+          return _FakeResponse(404, jsonEncode({'message': 'Not Found'}));
+        }
+        return _FakeResponse(500, 'unexpected: $url');
+      };
+      try {
+        await github.commitTree(
+          repo: const GitHubRepo(
+              owner: 'a', name: 'b', defaultBranch: 'main', privateRepo: false),
+          branch: 'main',
+          message: 'test',
+          files: {'README.md': utf8.encode('hello')},
+        );
+        fail('expected GitHubException');
+      } on GitHubException catch (e) {
+        // No workflow files involved → no workflow-scope advice, just the
+        // honest endpoint error (which already carries the generic 404
+        // stale-connection hint from describeApiError).
+        expect(e.message, isNot(contains('"workflow" permission')));
+        expect(e.message, contains('HTTP 404'));
+      }
     });
 
     test('a 404 from api.github.com names the endpoint and status', () async {
