@@ -45,8 +45,16 @@ class _ChatScreenState extends State<ChatScreen>
   bool _isUserNearBottom = true;
   bool _shouldAutoScroll = true;
   bool _scrollRequestPending = false;
-  final List<ChatMessage> _messages = [];
+  // Transcript/composer/task fields are SLOT-OWNED: Chat and Project each
+  // keep their own lists and scalars, and switching tabs re-points these
+  // fields at the target slot's objects (see _captureCurrentScope /
+  // _adoptScope). Nothing is cleared on a switch, so both tabs survive
+  // indefinitely — messages, pending diffs, activity timeline, composer
+  // text, attachments, scroll position and task state.
+  List<ChatMessage> _messages = [];
   List<ProposedChange> _pending = [];
+  List<AgentTimelineEntry> _timeline = [];
+  List<ChatSession> _recentSessions = const [];
   bool _busy = false;
   bool _restored = false;
   String? _streamBuf;
@@ -60,6 +68,29 @@ class _ChatScreenState extends State<ChatScreen>
   // Image attached in-chat (base64 data URL) — sent via vision format.
   String? _pendingImage;
   String? _pendingImageName;
+
+  /// Per-scope saved UI state. false = Chat tab, true = Project tab.
+  final Map<bool, _ScopeState> _slots = {};
+
+  /// Last project used in Project Mode — lets Project→Chat→Project skip the
+  /// project picker and restore instantly, like a persistent tab.
+  String? _lastProjectId;
+
+  /// Drops the Project slot when a DIFFERENT project is opened (the slot
+  /// belongs to the old project). Same project → slot stays valid. A slot
+  /// captured with NO project (null) is dropped whenever any project is
+  /// opened — its empty transcript no longer matches reality.
+  void _invalidateProjectSlotIfChanged(String? newProject) {
+    if (_slots[true] == null) return;
+    final slotProjectId = _projectIdsInSlots[true];
+    if (slotProjectId != newProject) {
+      _slots.remove(true);
+      _projectIdsInSlots.remove(true);
+    }
+  }
+
+  /// Project each slot was captured under, for invalidation.
+  final Map<bool, String?> _projectIdsInSlots = {};
 
   // ---- autonomous agent state ----
   bool _agentMode = false; // Chat is the safe default; Project is explicit.
@@ -75,10 +106,7 @@ class _ChatScreenState extends State<ChatScreen>
   AgentMode _approvalMode = AgentMode.auto;
   AgentLoop? _activeLoop;
 
-  /// Ordered REAL activity timeline: model narration (ReasoningEntry)
-  /// interleaved with executed tool steps (StepEntry). Drives the live
-  /// activity panel AND the persisted snapshot — nothing is fabricated.
-  final List<AgentTimelineEntry> _timeline = [];
+  // (moved above: _timeline is slot-owned so each tab keeps its own)
 
   /// Real task start/end — the only sources for the elapsed label.
   DateTime? _taskStart;
@@ -92,7 +120,7 @@ class _ChatScreenState extends State<ChatScreen>
   String? _taskId;
   Map<String, dynamic>? _resumeContext;
   /// Most recent saved conversations (for the resume card on fresh chats).
-  List<ChatSession> _recentSessions = const [];
+  /// (moved above: _recentSessions is slot-owned so each tab keeps its own)
   StreamSubscription<AgentEvent>? _eventSub;
   StreamSubscription<AgentThought>? _thoughtSub;
   StreamSubscription<AgentApprovalNeeded>? _approvalSub;
@@ -100,6 +128,91 @@ class _ChatScreenState extends State<ChatScreen>
 
   static String _approvalKey(String tool, Map<String, dynamic> args) =>
       '$tool:${args['path'] ?? args['name'] ?? ''}';
+
+  /// Snapshot of EVERYTHING the user sees in the current tab, taken when
+  /// switching away. Lists are re-pointed (not copied) so the visible
+  /// objects keep their identity — no serialization, no re-decode.
+  _ScopeState _captureCurrentScope() {
+    if (_agentMode) _projectIdsInSlots[true] = projectService.projectName;
+    return _ScopeState(
+      isProject: _agentMode,
+      messages: _messages,
+      pending: _pending,
+      timeline: _timeline,
+      recentSessions: _recentSessions,
+      sessionId: _sessionId,
+      busy: _busy,
+      streamBuf: _streamBuf,
+      inputText: _input.text,
+      scrollPixels: _scroll.hasClients ? _scroll.position.pixels : null,
+      restored: _restored,
+      pendingAttachment: _pendingAttachment,
+      pendingAttachmentName: _pendingAttachmentName,
+      pendingAttachmentKind: _pendingAttachmentKind,
+      pendingImage: _pendingImage,
+      pendingImageName: _pendingImageName,
+      taskStart: _taskStart,
+      taskEnd: _taskEnd,
+      agentState: _agentState,
+      agentError: _agentError,
+      taskId: _taskId,
+      lastAgentRequest: _lastAgentRequest,
+      resumeContext: _resumeContext,
+    );
+  }
+
+  /// Point the live fields at [s]'s objects and restore its per-tab UI
+  /// state (composer text, scroll position, attachments). Never clears:
+  /// the other tab's slot keeps its objects untouched. Restores EVERYTHING
+  /// the tab owns — including [_agentMode] and the agent task scalars — so
+  /// a fast-path switch is behaviorally identical to a full reload without
+  /// any of the disk reads or clearing.
+  void _adoptScope(_ScopeState s) {
+    _agentMode = s.isProject;
+    _messages = s.messages;
+    _pending = s.pending;
+    _timeline = s.timeline;
+    _recentSessions = s.recentSessions;
+    _sessionId = s.sessionId ??
+        // The outgoing save may have minted a NEW session id after this
+        // slot was captured — fall back to the scope's id map so switching
+        // back never splits one conversation into duplicate sessions.
+        (s.isProject
+            ? (projectService.projectName != null
+                ? _projectSessionIds[projectService.projectName]
+                : null)
+            : _chatSessionId);
+    _busy = s.busy;
+    _streamBuf = s.streamBuf;
+    _restored = s.restored;
+    _pendingAttachment = s.pendingAttachment;
+    _pendingAttachmentName = s.pendingAttachmentName;
+    _pendingAttachmentKind = s.pendingAttachmentKind;
+    _pendingImage = s.pendingImage;
+    _pendingImageName = s.pendingImageName;
+    _taskStart = s.taskStart;
+    _taskEnd = s.taskEnd;
+    _agentState = s.agentState;
+    _agentError = s.agentError;
+    _taskId = s.taskId;
+    _lastAgentRequest = s.lastAgentRequest;
+    _resumeContext = s.resumeContext;
+    _input.text = s.inputText;
+    _input.selection = TextSelection.collapsed(offset: s.inputText.length);
+    _restoreScroll(s.scrollPixels);
+  }
+
+  /// Restores the saved scroll offset WITHOUT the bottom-jump — a tab you
+  /// return to must look exactly as you left it (scroll position is part
+  /// of the state this fix preserves).
+  void _restoreScroll(double? pixels) {
+    if (pixels == null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scroll.hasClients) return;
+      final max = _scroll.position.maxScrollExtent;
+      _scroll.jumpTo(pixels.clamp(0.0, max));
+    });
+  }
 
   static const _imageExtensions = ['png', 'jpg', 'jpeg', 'webp', 'gif'];
 
@@ -221,6 +334,25 @@ class _ChatScreenState extends State<ChatScreen>
 
   Future<void> _switchConversation({required bool project}) async {
     if (!mounted) return;
+
+    // ---- FAST PATH: the tab was visited before ----
+    // Both tabs already live in memory; a switch re-points the state fields
+    // at the other slot. No disk read, no conversation lookup, no clearing,
+    // no forced scroll — and therefore no blink, no flash, no reset.
+    final savedSlot = _slots[project];
+    if (savedSlot != null) {
+      // Persist the outgoing scope to LOCAL storage first (same rule as
+      // dispose) so an app kill right after a switch loses nothing. This
+      // is a disk write, not a network/API call.
+      if (_messages.isNotEmpty || _timeline.isNotEmpty) {
+        unawaited(_saveSession());
+      }
+      _slots[!project] = _captureCurrentScope();
+      setState(() => _adoptScope(savedSlot));
+      return; // no API calls, no GitHub sync — state is already live
+    }
+
+    // ---- FIRST VISIT ONLY: load from disk once, then cache ----
     final sessions = await chatSessionStore.load();
     final projectId = project ? projectService.projectName : null;
     final preferredId = project
@@ -243,13 +375,16 @@ class _ChatScreenState extends State<ChatScreen>
       chosen = fallback;
     }
     if (!mounted) return;
+    _slots[!project] = _captureCurrentScope();
     setState(() {
       _agentMode = project;
-      _messages.clear();
-      _pending.clear();
+      _messages = chosen != null
+          ? List.of(collapseDuplicateSystemErrors(chosen.messages))
+          : <ChatMessage>[];
+      _pending = [];
       _clearAttachmentState();
       _streamBuf = null;
-      _timeline.clear();
+      _timeline = [];
       _input.clear();
       _recentSessions = const [];
       _sessionId = chosen?.id;
@@ -261,12 +396,20 @@ class _ChatScreenState extends State<ChatScreen>
       _lastAgentRequest = null;
       _resumeContext = null;
       if (chosen != null) {
-        _messages.addAll(collapseDuplicateSystemErrors(chosen.messages));
         _restoreActivity(chosen.activity);
       }
     });
+    // Cache the freshly loaded state so the NEXT visit takes the fast path.
+    // Captured AFTER the bottom-scroll below has been requested: the slot
+    // must describe the tab as it will look (scrolled to the newest
+    // message), not the stale offset inherited from the outgoing tab.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _slots[project] = _captureCurrentScope();
+    });
     // Project Mode was entered (or a project session restored): sync the
-    // repository context from the same source of truth as the Explorer.
+    // repository context from the same source of truth as the Explorer —
+    // ONCE per first entry, never on subsequent tab switches.
     if (project && projectService.projectName != null) {
       await _syncProjectContext();
     }
@@ -283,6 +426,40 @@ class _ChatScreenState extends State<ChatScreen>
       await _switchConversation(project: false);
       return;
     }
+
+    // Fast path — no picker: the ACTIVE project if one is open, else the
+    // last project used in Project Mode. The tab behaves like a persistent
+    // workspace; the picker only appears when there is nothing to restore.
+    final targetProject = projectService.projectName ?? _lastProjectId;
+    if (targetProject != null) {
+      var opened = true;
+      if (projectService.projectName != targetProject) {
+        try {
+          await _saveSession();
+          if (_sessionId != null) _chatSessionId = _sessionId;
+          await projectService.openProject(targetProject);
+        } on ProjectException catch (e) {
+          // The remembered project may have been deleted on-device — fall
+          // through to the picker so the user is never stuck.
+          opened = false;
+          _lastProjectId = null;
+          if (mounted) {
+            ScaffoldMessenger.of(context)
+                .showSnackBar(SnackBar(content: Text(e.message)));
+          }
+        }
+      }
+      if (opened) {
+        _invalidateProjectSlotIfChanged(projectService.projectName);
+        await _switchConversation(project: true);
+        if (_slots[true] == null) {
+          // First entry into this project: run the one-time init flow.
+          await _syncProjectContext();
+        }
+        return;
+      }
+    }
+
     final projects = await projectService.listProjects();
     if (!mounted) return;
     if (projects.isEmpty) {
@@ -322,12 +499,14 @@ class _ChatScreenState extends State<ChatScreen>
       await _saveSession();
       if (_sessionId != null) _chatSessionId = _sessionId;
       await projectService.openProject(chosen);
+      _lastProjectId = chosen;
+      _invalidateProjectSlotIfChanged(chosen);
       if (!mounted) return;
       await _switchConversation(project: true);
       // Initialization flow: active project → repository metadata →
-      // verify imported files → ready. Keeps Project Mode, the Explorer
-      // and the publish gate on one canonical state.
-      await _syncProjectContext();
+      // verify imported files → ready. Only on the first entry; tab
+      // switches never re-run it (fast path above).
+      if (_slots[true] == null) await _syncProjectContext();
     } on ProjectException catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
     }
@@ -432,6 +611,8 @@ class _ChatScreenState extends State<ChatScreen>
         if (selected.isProject && selected.projectId != null) {
       try {
         await projectService.openProject(selected.projectId!);
+        _lastProjectId = selected.projectId;
+        _invalidateProjectSlotIfChanged(selected.projectId);
       } catch (_) {
         // Keep the transcript available even if its project is no longer
         // present; Project Mode will show the normal project prompt.
@@ -449,6 +630,8 @@ class _ChatScreenState extends State<ChatScreen>
       _messages.addAll(collapseDuplicateSystemErrors(selected.messages));
       _restoreActivity(selected.activity);
     });
+    // The restored tab becomes its slot's initial content.
+    _slots[_agentMode] = _captureCurrentScope();
     // Project session restored: sync the repository context NOW — same
     // source of truth as the Explorer, never a reset on remount.
     if (_agentMode) await _syncProjectContext();
@@ -470,6 +653,8 @@ class _ChatScreenState extends State<ChatScreen>
         _pending.clear();
         _recentSessions = sessions.where((s) => !s.isProject).take(3).toList();
       });
+      // The fresh Chat tab is now the Chat slot's initial content.
+      _slots[false] = _captureCurrentScope();
     } else if (!_restored) {
       final sessions = await chatSessionStore.load();
       if (!mounted) return;
@@ -613,23 +798,36 @@ class _ChatScreenState extends State<ChatScreen>
 
   Future<void> _saveSession() async {
     if (_messages.isEmpty) return;
+    // Snapshot the scope BEFORE the first await. This method is fire-and-
+    // forget on tab switches; the user can flip tabs while the disk write
+    // is in flight, and every field below must describe the scope that was
+    // current when the save was REQUESTED — not whichever tab is live when
+    // the write resumes. Without this, an outgoing Chat save could adopt
+    // the incoming Project tab's messages/id (or vice versa) and split or
+    // merge saved conversations across tabs.
+    final savedIsProject = _agentMode;
+    final savedProjectId = _activeProjectId;
+    final savedSessionId = _sessionId;
+    final savedTitle = _sessionTitle;
+    final savedMessages = List.of(_messages);
+    final savedActivity = _activitySnapshot();
     // Adopt the id on first save so every later save updates the SAME
     // session (immediate mid-run saves must not create duplicates).
     final id = await chatSessionStore.save(
-      existingId: _sessionId,
-      title: _sessionTitle,
-      messages: List.of(_messages),
-      isProject: _agentMode,
-      projectId: _activeProjectId,
-      activity: _activitySnapshot(),
+      existingId: savedSessionId,
+      title: savedTitle,
+      messages: savedMessages,
+      isProject: savedIsProject,
+      projectId: savedProjectId,
+      activity: savedActivity,
     );
-    if (id.isNotEmpty && _sessionId == null) {
+    if (id.isNotEmpty && savedSessionId == null) {
       _sessionId = id;
     }
     if (id.isNotEmpty) {
-      if (_agentMode && _activeProjectId != null) {
-        _projectSessionIds[_activeProjectId!] = id;
-      } else if (!_agentMode) {
+      if (savedIsProject && savedProjectId != null) {
+        _projectSessionIds[savedProjectId] = id;
+      } else if (!savedIsProject) {
         _chatSessionId = id;
       }
     }
@@ -2356,4 +2554,62 @@ class _AttachmentThumbState extends State<_AttachmentThumb> {
           )
         : thumb;
   }
+}
+
+/// Everything a tab (Chat or Project) owns in the ChatScreen UI. Captured
+/// on switch-away, re-pointed on switch-back. Objects are shared by
+/// reference — switching is an O(1) re-point, never a rebuild of content.
+class _ScopeState {
+  /// Whether this slot belongs to Project Mode (true) or Chat Mode (false).
+  /// Used by [_adoptScope] to pick the right session-id fallback.
+  final bool isProject;
+
+  final List<ChatMessage> messages;
+  final List<ProposedChange> pending;
+  final List<AgentTimelineEntry> timeline;
+  final List<ChatSession> recentSessions;
+  final String? sessionId;
+  final bool busy;
+  final String? streamBuf;
+  final String inputText;
+  final double? scrollPixels;
+  final bool restored;
+  final String? pendingAttachment;
+  final String? pendingAttachmentName;
+  final String? pendingAttachmentKind;
+  final String? pendingImage;
+  final String? pendingImageName;
+  final DateTime? taskStart;
+  final DateTime? taskEnd;
+  final AgentTaskState agentState;
+  final String? agentError;
+  final String? taskId;
+  final String? lastAgentRequest;
+  final Map<String, dynamic>? resumeContext;
+
+  const _ScopeState({
+    required this.isProject,
+    required this.messages,
+    required this.pending,
+    required this.timeline,
+    required this.recentSessions,
+    required this.sessionId,
+    required this.busy,
+    required this.streamBuf,
+    required this.inputText,
+    required this.scrollPixels,
+    required this.restored,
+    required this.pendingAttachment,
+    required this.pendingAttachmentName,
+    required this.pendingAttachmentKind,
+    required this.pendingImage,
+    required this.pendingImageName,
+    required this.taskStart,
+    required this.taskEnd,
+    required this.agentState,
+    required this.agentError,
+    required this.taskId,
+    required this.lastAgentRequest,
+    required this.resumeContext,
+  });
 }
