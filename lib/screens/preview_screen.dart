@@ -31,6 +31,11 @@ class PreviewScreen extends StatefulWidget {
   /// compiled Flutter/Vite preview). Takes precedence over [path].
   final String? url;
 
+  /// A directory inside the open project to serve as the web root (e.g. the
+  /// prebuilt `dist/` of a React project). Enables the Local Preview path
+  /// for compiled static output without any toolchain.
+  final String? localRoot;
+
   /// Friendly screen title for project previews (the project name).
   final String? projectTitle;
 
@@ -40,6 +45,7 @@ class PreviewScreen extends StatefulWidget {
       this.html,
       this.path,
       this.url,
+      this.localRoot,
       this.projectTitle});
 
   /// Can this file be previewed in-app?
@@ -94,6 +100,24 @@ class _PreviewScreenState extends State<PreviewScreen> {
       setState(() => _serverMode = false);
       _initControllerWithUrl(remote);
       return;
+    }
+
+    // PREBUILT OUTPUT mode: serve an already-compiled directory (dist/,
+    // out/, build/web) over loopback HTTP — Local Preview without GitHub.
+    final prebuilt = widget.localRoot;
+    if (prebuilt != null) {
+      try {
+        final base = await previewServerInstance.start(prebuilt);
+        if (!mounted) return;
+        setState(() => _serverMode = true);
+        _initControllerWithUrl(base);
+        return;
+      } catch (e) {
+        if (mounted) {
+          setState(() => _error = 'Could not start the local preview server: $e');
+        }
+        return;
+      }
     }
 
     final path = widget.path;
