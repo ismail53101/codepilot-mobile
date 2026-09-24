@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../agent_activity.dart';
 import '../agent_loop.dart';
+import '../execution_gate.dart';
 import '../models.dart';
 import '../theme.dart';
 
@@ -33,6 +34,14 @@ class AgentActivityPanel extends StatefulWidget {
   final AgentTaskState state;
   final String? errorMessage;
 
+  /// Live execution phase from the error-gated lifecycle — drives the
+  /// INSPECTING → EDITING → VALIDATING → … → CI PASSED state machine chip.
+  final ExecutionPhase? executionPhase;
+
+  /// The most recent FIXING/CI-repair reason (from the gate) — shown while
+  /// repairing and on the failure card instead of a duplicated gate text.
+  final String? phaseNote;
+
   /// Real task start/end — the ONLY sources for the elapsed label.
   final DateTime? startedAt;
   final DateTime? endedAt;
@@ -48,6 +57,8 @@ class AgentActivityPanel extends StatefulWidget {
     super.key,
     required this.timeline,
     required this.state,
+    this.executionPhase,
+    this.phaseNote,
     this.errorMessage,
     this.startedAt,
     this.endedAt,
@@ -134,18 +145,35 @@ class _AgentActivityPanelState extends State<AgentActivityPanel> {
     return '${secs}s';
   }
 
-  /// Live status line — reflects the loop's actual position.
-  String get _statusText => switch (widget.state) {
-        AgentTaskState.running => _runningStep?.title ??
-            (_lastReasoning != null
-                ? 'Thinking · reasoning is streaming above'
-                : 'Launching model · Waiting for the first model…'),
-        AgentTaskState.stopping => 'Stopping…',
-        AgentTaskState.completed => '✓ Task completed',
-        AgentTaskState.failed => '✕ Task failed',
-        AgentTaskState.cancelled => '⏹ Task cancelled',
-        AgentTaskState.idle => 'Working…',
-      };
+  /// Live status line — reflects the loop's actual position. When the
+  /// error-gated lifecycle reports a phase, it leads the status text.
+  String get _statusText {
+    final phase = widget.executionPhase;
+    final phasePrefix = (phase == null || phase == ExecutionPhase.idle)
+        ? ''
+        : '${phase.label} · ';
+    return switch (widget.state) {
+      AgentTaskState.running => switch (phase) {
+          ExecutionPhase.validating => '${phasePrefix}checking the changes',
+          ExecutionPhase.fixing => '$phasePrefix${_fixNote ?? 'repairing issues'}',
+          ExecutionPhase.ciRunning => '${phasePrefix}waiting for GitHub Actions',
+          ExecutionPhase.ciFailedFixing =>
+            '$phasePrefix${_fixNote ?? 'diagnosing the failure'}',
+          _ => phasePrefix + (_runningStep?.title ??
+              (_lastReasoning != null
+                  ? 'Thinking · reasoning is streaming above'
+                  : 'Launching model · Waiting for the first model…')),
+        },
+      AgentTaskState.stopping => 'Stopping…',
+      AgentTaskState.completed => '✓ Task completed',
+      AgentTaskState.failed => '✕ Task failed',
+      AgentTaskState.cancelled => '⏹ Task cancelled',
+      AgentTaskState.idle => 'Working…',
+    };
+  }
+
+  /// The most recent FIXING note (validation failure / gate reason).
+  String? get _fixNote => widget.phaseNote;
 
   bool get _active =>
       widget.state == AgentTaskState.running ||
@@ -188,12 +216,23 @@ class _AgentActivityPanelState extends State<AgentActivityPanel> {
                 ),
               ),
             ),
+          // ERROR-GATED LIFECYCLE CHIP — the visible execution state machine
+          // (INSPECTING → EDITING → VALIDATING → FIXING → COMMITTING →
+          // PUSHING → CI RUNNING → CI PASSED → COMPLETED).
+          if (_active &&
+              widget.executionPhase != null &&
+              widget.executionPhase != ExecutionPhase.idle)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+              child: _lifecycleChip(widget.executionPhase!),
+            ),
           if (widget.state == AgentTaskState.failed &&
-              widget.errorMessage != null)
+              (widget.phaseNote != null || widget.errorMessage != null))
             Padding(
               padding: const EdgeInsets.fromLTRB(12, 8, 12, 2),
               child: SelectableText(
-                '✕ ${widget.errorMessage}',
+                // The gate's reason leads; the raw error is the fallback.
+                '✕ ${widget.phaseNote ?? widget.errorMessage}',
                 style: const TextStyle(
                     color: AppTheme.err, fontSize: 12, height: 1.4),
               ),
@@ -237,6 +276,60 @@ class _AgentActivityPanelState extends State<AgentActivityPanel> {
           const SizedBox(height: 4),
         ],
       ),
+    );
+  }
+
+  // ---------------- lifecycle chip ----------------
+
+  /// The visible state machine: INSPECTING → EDITING → VALIDATING →
+  /// FIXING → COMMITTING → PUSHING → CI RUNNING → CI FAILED — FIXING →
+  /// CI PASSED → COMPLETED. Only the traveled portion is shown.
+  static const _lifecycleOrder = [
+    ExecutionPhase.inspecting,
+    ExecutionPhase.editing,
+    ExecutionPhase.validating,
+    ExecutionPhase.fixing,
+    ExecutionPhase.committing,
+    ExecutionPhase.pushing,
+    ExecutionPhase.verifyingRemote,
+    ExecutionPhase.ciRunning,
+    ExecutionPhase.ciFailedFixing,
+    ExecutionPhase.ciPassed,
+  ];
+
+  Widget _lifecycleChip(ExecutionPhase current) {
+    final reached = _lifecycleOrder.indexOf(current);
+    final shown = reached < 0
+        ? const <ExecutionPhase>[]
+        : _lifecycleOrder.take(reached + 1).toList();
+    if (shown.isEmpty) return const SizedBox.shrink();
+    return Wrap(
+      spacing: 6,
+      runSpacing: 4,
+      children: [
+        for (final p in shown)
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+            decoration: BoxDecoration(
+              color: p == current
+                  ? AppTheme.glowAccent.withOpacity(0.14)
+                  : AppTheme.surface,
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(
+                color: p == current ? AppTheme.glowAccent : AppTheme.border,
+              ),
+            ),
+            child: Text(
+              p.label,
+              style: TextStyle(
+                fontSize: 10,
+                letterSpacing: 0.4,
+                fontWeight: FontWeight.w600,
+                color: p == current ? AppTheme.glowAccent : AppTheme.muted,
+              ),
+            ),
+          ),
+      ],
     );
   }
 

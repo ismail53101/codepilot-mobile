@@ -949,8 +949,9 @@ class GitHubService {
     return (number: data['number'] as int, url: data['html_url'] as String);
   }
 
-  /// Latest CI run for [branch] (null when none yet).
-  Future<({String status, String? conclusion, int runId, String url})?>
+  /// Latest CI run for [branch] (null when none yet). [headSha] lets
+  /// callers verify the run belongs to THEIR push (runs appear async).
+  Future<({String status, String? conclusion, int runId, String url, String? headSha})?>
       latestRun(GitHubRepo repo, String branch) async {
     final headers = await _auth();
     final url =
@@ -967,6 +968,7 @@ class GitHubService {
       conclusion: run['conclusion'] as String?,
       runId: run['id'] as int,
       url: run['html_url'] as String? ?? '',
+      headSha: run['head_sha'] as String?,
     );
   }
 

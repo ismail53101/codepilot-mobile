@@ -533,7 +533,9 @@ class ToolRegistry {
           return 'OK: commit ${result.sha.substring(0, 8)} created on $branch '
               '(${changes.length} file${changes.length == 1 ? '' : 's'}: '
               '${changes.map((c) => '${c.status} ${c.path}').join(', ')})\n'
-              '${result.htmlUrl}';
+              '${result.htmlUrl}\n'
+              'COMMIT_SHA=${result.sha}\n'
+              'BRANCH=$branch';
         },
       );
 
@@ -643,14 +645,15 @@ class ToolRegistry {
           final branch = args['branch'] as String? ?? repo.defaultBranch;
           final wait = args['wait'] as bool? ?? true;
 
-          Future<({String status, String? conclusion, int runId, String url})?>
+          Future<({String status, String? conclusion, int runId, String url, String? headSha})?>
               check() => github.latestRun(repo, branch);
 
           if (!wait) {
             final run = await check();
             if (run == null) return 'No CI runs found for branch "$branch".';
             return 'CI on $branch: status=${run.status} '
-                'conclusion=${run.conclusion ?? '-'} (run ${run.runId})';
+                'conclusion=${run.conclusion ?? '-'} (run ${run.runId}, '
+                'head=${run.headSha ?? 'unknown'})';
           }
 
           // Bounded async polling — each check is one short request; the
@@ -672,10 +675,12 @@ class ToolRegistry {
             if (run.status == 'completed') {
               if (run.conclusion == 'failure') {
                 final log = await github.fetchFailureLog(repo, run.runId);
-                return 'CI FAILED on $branch (run ${run.runId})\n$log';
+                return 'CI FAILED on $branch (run ${run.runId}, '
+                    'head=${run.headSha ?? 'unknown'})\n$log';
               }
               return 'CI on $branch: conclusion=${run.conclusion ?? 'success'} '
-                  '(run ${run.runId}) ${run.url}';
+                  '(run ${run.runId}, head=${run.headSha ?? 'unknown'}) '
+                  '${run.url}';
             }
             // Still in progress — release the event loop, then re-check.
             await Future<void>.delayed(delay);

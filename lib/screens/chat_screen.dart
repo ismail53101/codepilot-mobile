@@ -10,6 +10,7 @@ import '../agent_loop.dart';
 import '../agent_activity.dart';
 import '../agent_service.dart';
 import '../api_client.dart';
+import '../execution_gate.dart';
 import '../github_service.dart';
 import '../main.dart';
 import '../models.dart';
@@ -125,6 +126,13 @@ class _ChatScreenState extends State<ChatScreen>
   StreamSubscription<AgentThought>? _thoughtSub;
   StreamSubscription<AgentApprovalNeeded>? _approvalSub;
   StreamSubscription<AgentOutcome>? _outcomeSub;
+  StreamSubscription<AgentPhaseChanged>? _phaseSub;
+  /// Live execution phase from the error-gated lifecycle (UI state machine).
+  ExecutionPhase _execPhase = ExecutionPhase.idle;
+
+  /// The most recent FIXING/CI-failure reason (gate text) — shown as the
+  /// status note while repairing, and in the failure card.
+  String? _phaseNote;
 
   static String _approvalKey(String tool, Map<String, dynamic> args) =>
       '$tool:${args['path'] ?? args['name'] ?? ''}';
@@ -1203,6 +1211,21 @@ class _ChatScreenState extends State<ChatScreen>
     );
     _activeLoop = loop;
 
+    // Execution-phase state machine — drives the INSPECTING → … → CI PASSED
+    // lifecycle chip in the activity panel. The note is reset per run so a
+    // new task never inherits the previous task's FIXING reason.
+    setState(() {
+      _execPhase = ExecutionPhase.inspecting;
+      _phaseNote = null;
+    });
+    _phaseSub = loop.phases.listen((p) {
+      if (!mounted) return;
+      setState(() {
+        _execPhase = p.phase;
+        if (p.note != null) _phaseNote = p.note;
+      });
+    });
+
     _eventSub = loop.events.listen((e) {
       if (!mounted) return;
       setState(() {
@@ -1318,10 +1341,12 @@ class _ChatScreenState extends State<ChatScreen>
       _thoughtSub?.cancel();
       _approvalSub?.cancel();
       _outcomeSub?.cancel();
+      _phaseSub?.cancel();
       _eventSub = null;
       _thoughtSub = null;
       _approvalSub = null;
       _outcomeSub = null;
+      _phaseSub = null;
       _activeLoop = null;
       if (mounted) {
         setState(() {
@@ -1332,6 +1357,12 @@ class _ChatScreenState extends State<ChatScreen>
                 ? AgentTaskState.cancelled
                 : AgentTaskState.failed;
           }
+          _execPhase = switch (_agentState) {
+            AgentTaskState.completed => ExecutionPhase.completed,
+            AgentTaskState.failed => ExecutionPhase.failed,
+            _ => ExecutionPhase.idle,
+          };
+          _phaseNote = null;
         });
       }
       _scrollToBottom();
@@ -1689,6 +1720,8 @@ class _ChatScreenState extends State<ChatScreen>
                 AgentActivityPanel(
                   timeline: _timeline,
                   state: _agentState,
+                  executionPhase: _execPhase,
+                  phaseNote: _phaseNote,
                   errorMessage: _agentError,
                   startedAt: _taskStart,
                   endedAt: _taskEnd,
